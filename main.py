@@ -789,7 +789,7 @@ def run_telegram_bot():
     app.add_handler(CommandHandler("ledger", ledger_cmd))
     app.add_handler(CommandHandler("positions", positions_cmd))
     app.add_handler(CommandHandler("close", close_cmd))
-    app.run_polling()
+    app.run_polling(signal_handlers=False)
 
 # -------------------- Flask Web Server --------------------
 flask_app = flask.Flask(__name__)
