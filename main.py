@@ -18,7 +18,6 @@ import os
 import sqlite3
 import threading
 import time
-import traceback
 from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
@@ -28,7 +27,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyotp
-import requests
 from gtts import gTTS
 from SmartApi.smartConnect import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
@@ -413,36 +411,62 @@ def position_size(capital, risk_pct, entry, sl):
     lot = risk_amt / price_risk
     return (lot, risk_amt)
 
-# -------------------- Historical Data Refresher (5 min) --------------------
+# -------------------- Historical Data Refresher (5 min) with rate-limit safety --------------------
 def historical_refresher():
     interval_map = {"1m":"ONE_MINUTE","5m":"FIVE_MINUTE","15m":"FIFTEEN_MINUTE","1h":"ONE_HOUR"}
     while True:
         try:
             obj = SmartConnect(api_key=ANGEL_API_KEY)
-            obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, pyotp.TOTP(ANGEL_TOTP_SECRET).now())
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            login = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not login.get('status'):
+                logger.error(f"Historical refresh login failed: {login}")
+                time.sleep(60)
+                continue
             for interval, store in historical_dfs.items():
                 for sym in SYMBOLS:
                     token = sym.get("token")
-                    if not token: continue
+                    if not token:
+                        # Try to fetch token again if missing
+                        resp = obj.searchScrip(sym["exchange"], sym["symbol"])
+                        if resp.get('status') and resp.get('data'):
+                            token = str(resp['data'][0]['token'])
+                            sym["token"] = token
+                        else:
+                            logger.warning(f"Could not get token for {sym['symbol']}")
+                            continue
                     end = datetime.datetime.now()
                     start = end - datetime.timedelta(days=7)
-                    resp = obj.getCandleData({
-                        "exchange": sym["exchange"], "symboltoken": token,
-                        "interval": interval_map[interval],
-                        "fromdate": start.strftime("%Y-%m-%d %H:%M"),
-                        "todate": end.strftime("%Y-%m-%d %H:%M")
-                    })
-                    if resp.get('status') and resp.get('data'):
-                        df = pd.DataFrame(resp['data'], columns=["timestamp","open","high","low","close","volume"])
-                        df["timestamp"] = pd.to_datetime(df["timestamp"])
-                        df.set_index("timestamp", inplace=True)
-                        df.columns = [c.lower() for c in df.columns]
-                        with HIST_LOCK:
-                            store[sym["symbol"]] = df
-            logger.info("Historical data refreshed")
+                    try:
+                        resp = obj.getCandleData({
+                            "exchange": sym["exchange"],
+                            "symboltoken": token,
+                            "interval": interval_map[interval],
+                            "fromdate": start.strftime("%Y-%m-%d %H:%M"),
+                            "todate": end.strftime("%Y-%m-%d %H:%M")
+                        })
+                        if resp.get('status') and resp.get('data'):
+                            df = pd.DataFrame(resp['data'], columns=["timestamp","open","high","low","close","volume"])
+                            df["timestamp"] = pd.to_datetime(df["timestamp"])
+                            df.set_index("timestamp", inplace=True)
+                            df.columns = [c.lower() for c in df.columns]
+                            with HIST_LOCK:
+                                store[sym["symbol"]] = df
+                            logger.debug(f"Updated {sym['symbol']} {interval}")
+                        elif "exceeding access rate" in str(resp):
+                            logger.warning(f"Rate limit hit for {sym['symbol']} {interval} - backing off")
+                            time.sleep(10)
+                        else:
+                            logger.warning(f"No data for {sym['symbol']} {interval}: {resp.get('message')}")
+                    except Exception as e:
+                        logger.error(f"Error fetching {sym['symbol']} {interval}: {e}")
+                    # Pause between API calls to avoid rate limits
+                    time.sleep(2)
+                time.sleep(1)  # small extra pause between intervals
+            logger.info("Historical data refresh cycle completed")
         except Exception as e:
-            logger.error(f"Historical refresh error: {e}")
-        time.sleep(300)
+            logger.error(f"Historical refresher thread error: {e}")
+        time.sleep(300)  # 5 minutes
 
 # ==================== PART 3: SIGNAL PROCESSING, TRADE MANAGER, TELEGRAM, FLASK, MAIN ====================
 # -------------------- Trade Manager (Trailing Stop) --------------------
@@ -552,13 +576,11 @@ def gemini_report(trade):
 
 # -------------------- Dynamic PCR from Cache (with mapping) --------------------
 def fetch_options_chain(symbol: str) -> Dict[str, Any]:
-    """Fetch dynamic PCR proxy using live WebSocket Open Interest data from cache."""
     target_key = "NIFTY" if "NIFTY" in symbol.upper() else "BANKNIFTY" if "BANK" in symbol.upper() else "SENSEX"
     with CACHE_LOCK:
         data = GLOBAL_LIVE_FEED_CACHE.get(target_key, {})
         live_oi = data.get("oi", 0)
         live_volume = data.get("volume", 0)
-
     if live_oi > 0:
         pcr = 0.8 if (live_volume % 2 == 0) else 1.2
     else:
@@ -584,14 +606,12 @@ def process_symbol(sym_info):
     low = df["low"].values
     current = ltp
 
-    # Indicators
     ema20 = calculate_ema(closes,20)[-1]
     ema50 = calculate_ema(closes,50)[-1]
     rsi = calculate_rsi(closes,14)
     atr = calculate_atr(high, low, closes, 14)
     vwap = calculate_vwap(df)
 
-    # Patterns
     order_blocks = detect_order_blocks(df)
     bos, _ = detect_bos_choch(df)
     liquidity = detect_liquidity_pools(df)
@@ -600,7 +620,6 @@ def process_symbol(sym_info):
     crt_sig, entry_retest, sl, target, conf = detect_crt_setup(df)
     ifvg_sig, ifvg_l, ifvg_u = detect_ifvg(df)
 
-    # Multi-timeframe bias
     mtf_bias = {}
     for tf in ["5m","15m","1h"]:
         with HIST_LOCK:
@@ -613,15 +632,12 @@ def process_symbol(sym_info):
             else:
                 mtf_bias[tf] = "NEUTRAL"
 
-    # Options PCR
     opt = fetch_options_chain(name)
-    # SMT (only for NIFTY)
     smt = False
     smt_type = ""
     if sym == "NIFTY" and "BANKNIFTY" in historical_dfs["1m"]:
         smt, smt_type, _ = detect_smt_divergence(df, historical_dfs["1m"]["BANKNIFTY"])
 
-    # Scoring
     final_signal = 0
     score = 0
     if crt_sig != 0:
@@ -690,12 +706,10 @@ async def run_scanner():
     last_trade_time = {}
     while True:
         for sym_info in SYMBOLS:
-            # Enforce Nifty 50 exclusive filter
             if sym_info["name"] != "Nifty 50":
                 continue
             trade = process_symbol(sym_info)
             if trade and ENABLE_AUTO_TRADE:
-                # Cooldown 5 minutes for same symbol
                 now = time.time()
                 sym = trade["asset_symbol"]
                 if sym in last_trade_time and now - last_trade_time[sym] < 300:
@@ -707,7 +721,6 @@ async def run_scanner():
                     f"Entry {trade['entry_price']:.2f} SL {trade['stop_loss']:.2f} Target {trade['target_price']:.2f}\n"
                     f"Lot {trade['lot_size']:.4f} Risk ₹{trade['risk_amount']:.2f} Score {trade['smc_score']}"
                 )
-                # Generate chart in executor to avoid blocking
                 if trade["asset_symbol"] in historical_dfs["1m"]:
                     df_chart = historical_dfs["1m"][trade["asset_symbol"]].tail(100)
                     loop = asyncio.get_running_loop()
