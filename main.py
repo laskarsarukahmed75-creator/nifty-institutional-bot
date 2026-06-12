@@ -30,7 +30,8 @@ import pandas as pd
 import pyotp
 import requests
 from gtts import gTTS
-from smartapi import SmartConnect, SmartWebSocketV2
+from SmartApi.smartConnect import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from telegram import Bot, Update, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 
