@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-INDIAN INDICES SCALPING BOT - YFINANCE FALLBACK (No Angel One Token Required)
+INDIAN INDICES SCALPING BOT - ANGEL ONE (FIXED)
+- Robust token fetch with exponential backoff
+- Proper synthetic candle builder from live ticks
 """
 
 import asyncio
@@ -23,12 +25,26 @@ import flask
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import pyotp
 from gtts import gTTS
+from SmartApi.smartConnect import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from telegram import Bot, Update, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # -------------------- Configuration --------------------
+REQUIRED_ENV_VARS = [
+    "ANGEL_API_KEY", "ANGEL_CLIENT_ID", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "GEMINI_API_KEY",
+]
+missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+if missing_vars:
+    raise EnvironmentError(f"Missing env vars: {missing_vars}")
+
+ANGEL_API_KEY = os.getenv("ANGEL_API_KEY")
+ANGEL_CLIENT_ID = os.getenv("ANGEL_CLIENT_ID")
+ANGEL_PASSWORD = os.getenv("ANGEL_PASSWORD")
+ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -40,20 +56,20 @@ ENABLE_TRAILING_STOP = os.getenv("ENABLE_TRAILING_STOP", "True").lower() == "tru
 TRAILING_ACTIVATION_PERCENT = float(os.getenv("TRAILING_ACTIVATION_PERCENT", "0.5"))
 TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "0.3"))
 
-SYMBOLS_YF = [
-    {"name": "Nifty 50", "symbol": "^NSEI"},
-    {"name": "Bank Nifty", "symbol": "^NSEBANK"},
-    {"name": "Sensex", "symbol": "^BSESN"},
+SYMBOLS = [
+    {"name": "Nifty 50", "symbol": "NIFTY", "exchange": "NSE", "token": None},
+    {"name": "Bank Nifty", "symbol": "BANKNIFTY", "exchange": "NSE", "token": None},
+    {"name": "Sensex", "symbol": "SENSEX", "exchange": "BSE", "token": None},
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("YFinanceBot")
+logger = logging.getLogger("ScalpingBot")
 
 # -------------------- Thread‑Safe Cache --------------------
 GLOBAL_LIVE_FEED_CACHE = {
-    "^NSEI": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
-    "^NSEBANK": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
-    "^BSESN": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
+    "NIFTY": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
+    "BANKNIFTY": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
+    "SENSEX": {"ltp": 0.0, "volume": 0, "oi": 0, "timestamp": None, "prev_ltp": 0.0},
 }
 CACHE_LOCK = threading.RLock()
 
@@ -115,7 +131,7 @@ def update_trade_exit(tid, exit_price, pnl):
     conn.commit()
     conn.close()
 
-# -------------------- Footprint (dummy for compatibility) --------------------
+# -------------------- Footprint & Delta --------------------
 @dataclass
 class Tick:
     timestamp: datetime.datetime
@@ -126,45 +142,132 @@ class Tick:
 class FootprintAnalyzer:
     def __init__(self, window_sec=60):
         self.queue = deque()
+        self.window = window_sec
         self.delta = 0.0
+        self.profile = {}
     def add_tick(self, tick: Tick):
+        self.queue.append(tick)
         self.delta += tick.volume if tick.side == "BUY" else -tick.volume
+        price = round(tick.price, 2)
+        if price not in self.profile:
+            self.profile[price] = {"buy":0, "sell":0}
+        if tick.side == "BUY":
+            self.profile[price]["buy"] += tick.volume
+        else:
+            self.profile[price]["sell"] += tick.volume
+        now = tick.timestamp
+        while self.queue and (now - self.queue[0].timestamp).total_seconds() > self.window:
+            old = self.queue.popleft()
+            self.delta -= old.volume if old.side == "BUY" else -old.volume
     def get_delta(self): return self.delta
 
 footprint = FootprintAnalyzer()
 
-# -------------------- Live Data Fetch Thread (yfinance) --------------------
-def yfinance_live_feed():
-    """Background thread to fetch latest LTP every second."""
-    last_data = {}
+# -------------------- Token Fetch with Retry --------------------
+def fetch_token_with_retry(obj, exchange, symbol, max_retries=5):
+    """Fetch token with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            resp = obj.searchScrip(exchange, symbol)
+            if resp.get('status') and resp.get('data'):
+                token = str(resp['data'][0]['token'])
+                logger.info(f"Fetched token for {symbol}: {token}")
+                return token
+            else:
+                logger.warning(f"Token fetch attempt {attempt+1} for {symbol} failed: {resp.get('message')}")
+        except Exception as e:
+            logger.error(f"Token fetch error for {symbol}: {e}")
+        time.sleep(2 ** attempt)  # 1,2,4,8,16 sec
+    return None
+
+# -------------------- Angel One WebSocket (Fixed) --------------------
+def angel_websocket_engine():
+    backoff = 2
+    max_backoff = 60
     while True:
         try:
-            for sym_info in SYMBOLS_YF:
-                symbol = sym_info["symbol"]
-                ticker = yf.Ticker(symbol)
-                # Get 1m data to extract latest
-                hist = ticker.history(period="1d", interval="1m")
-                if not hist.empty:
-                    ltp = hist["Close"].iloc[-1]
-                    volume = hist["Volume"].iloc[-1] if not pd.isna(hist["Volume"].iloc[-1]) else 0
+            obj = SmartConnect(api_key=ANGEL_API_KEY)
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            login = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not login.get('status'):
+                logger.error(f"Login failed: {login}")
+                time.sleep(backoff)
+                backoff = min(backoff*2, max_backoff)
+                continue
+
+            feed_token = obj.getfeedToken()
+            # Fetch all tokens with retry
+            all_ok = True
+            for sym in SYMBOLS:
+                if sym.get("token") is None:
+                    token = fetch_token_with_retry(obj, sym["exchange"], sym["symbol"])
+                    if token:
+                        sym["token"] = token
+                    else:
+                        logger.error(f"Could not fetch token for {sym['symbol']} after retries")
+                        all_ok = False
+                        break
+            if not all_ok:
+                time.sleep(backoff)
+                backoff = min(backoff*2, max_backoff)
+                continue
+
+            backoff = 2
+            sub_list = [{"token": sym["token"], "exchange": sym["exchange"]} for sym in SYMBOLS]
+            ws = SmartWebSocketV2(auth_token=feed_token, api_key=ANGEL_API_KEY,
+                                  client_id=ANGEL_CLIENT_ID, feed_token=feed_token)
+
+            def on_open(wss):
+                logger.info("WebSocket opened, subscribing...")
+                wss.subscribe(sub_list, "ALL")
+
+            def on_message(wss, msg):
+                try:
+                    data = json.loads(msg)
+                    if 'ltp' not in data: return
+                    ltp = float(data['ltp']) / 100.0
+                    sym_key = None
+                    for s in SYMBOLS:
+                        if s["symbol"] in data.get('symbol','').upper():
+                            sym_key = s["symbol"]
+                            break
+                    if not sym_key: return
                     with CACHE_LOCK:
-                        prev = GLOBAL_LIVE_FEED_CACHE[symbol].get("ltp", ltp)
-                        GLOBAL_LIVE_FEED_CACHE[symbol].update({
+                        prev = GLOBAL_LIVE_FEED_CACHE[sym_key].get("ltp", 0.0)
+                        GLOBAL_LIVE_FEED_CACHE[sym_key].update({
                             "ltp": ltp,
                             "prev_ltp": prev,
-                            "volume": volume,
-                            "oi": 0,
+                            "volume": int(data.get('volume', 0)),
+                            "oi": int(data.get('oi', 0)),
                             "timestamp": datetime.datetime.now()
                         })
-                    # Determine tick side
                     side = "BUY" if ltp > prev else "SELL" if ltp < prev else "NEUTRAL"
                     if side != "NEUTRAL":
-                        footprint.add_tick(Tick(datetime.datetime.now(), ltp, max(1, volume), side))
-        except Exception as e:
-            logger.error(f"YFinance fetch error: {e}")
-        time.sleep(1)
+                        footprint.add_tick(Tick(datetime.datetime.now(), ltp,
+                                                max(1, int(data.get('volume', 1))), side))
+                except Exception as e:
+                    logger.error(f"on_message error: {e}")
 
-# ==================== INDICATORS & PATTERNS (SAME AS BEFORE) ====================
+            def on_error(wss, err):
+                logger.error(f"WebSocket error: {err}")
+
+            def on_close(wss, code, reason):
+                logger.warning(f"WebSocket closed: {code} {reason}")
+
+            ws.on_open = on_open
+            ws.on_message = on_message
+            ws.on_error = on_error
+            ws.on_close = on_close
+
+            ws.connect()
+            while ws.ws and ws.ws.sock and ws.ws.sock.connected:
+                time.sleep(1)
+        except Exception as e:
+            logger.error(f"WebSocket engine error: {e}")
+        time.sleep(backoff)
+        backoff = min(backoff*2, max_backoff)
+
+# ==================== INDICATORS & PATTERNS (unchanged) ====================
 historical_dfs = {"1m": {}, "5m": {}, "15m": {}, "1h": {}}
 HIST_LOCK = threading.RLock()
 
@@ -326,7 +429,7 @@ def detect_ifvg(df):
 
 def get_hour_open(symbol):
     with CACHE_LOCK:
-        return GLOBAL_LIVE_FEED_CACHE.get(symbol, {}).get("ltp", 0.0)
+        return GLOBAL_LIVE_FEED_CACHE.get(symbol.upper(), {}).get("ltp", 0.0)
 
 def hourly_discount_filter(sym, price, side):
     hour_open = get_hour_open(sym)
@@ -341,69 +444,144 @@ def position_size(capital, risk_pct, entry, sl):
     lot = risk_amt / price_risk
     return (lot, risk_amt)
 
-# -------------------- Historical Data Refresher (yfinance) --------------------
+# -------------------- Historical Data Refresher (with rate limits) --------------------
 def historical_refresher():
-    """Fetch 1m/5m/15m/1h data every 5 minutes from yfinance."""
+    interval_map = {"1m":"ONE_MINUTE","5m":"FIVE_MINUTE","15m":"FIFTEEN_MINUTE","1h":"ONE_HOUR"}
     while True:
         try:
-            for interval in ["1m", "5m", "15m", "1h"]:
-                for sym_info in SYMBOLS_YF:
-                    sym = sym_info["symbol"]
+            obj = SmartConnect(api_key=ANGEL_API_KEY)
+            totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+            login = obj.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+            if not login.get('status'):
+                logger.error(f"Historical login failed: {login}")
+                time.sleep(60)
+                continue
+            for interval, store in historical_dfs.items():
+                for sym in SYMBOLS:
+                    token = sym.get("token")
+                    if not token:
+                        token = fetch_token_with_retry(obj, sym["exchange"], sym["symbol"])
+                        if token:
+                            sym["token"] = token
+                        else:
+                            continue
+                    end = datetime.datetime.now()
+                    start = end - datetime.timedelta(days=7)
                     try:
-                        ticker = yf.Ticker(sym)
-                        end = datetime.datetime.now()
-                        start = end - datetime.timedelta(days=7)
-                        df = ticker.history(start=start, end=end, interval=interval)
-                        if not df.empty:
+                        resp = obj.getCandleData({
+                            "exchange": sym["exchange"],
+                            "symboltoken": token,
+                            "interval": interval_map[interval],
+                            "fromdate": start.strftime("%Y-%m-%d %H:%M"),
+                            "todate": end.strftime("%Y-%m-%d %H:%M")
+                        })
+                        if resp.get('status') and resp.get('data'):
+                            df = pd.DataFrame(resp['data'], columns=["timestamp","open","high","low","close","volume"])
+                            df["timestamp"] = pd.to_datetime(df["timestamp"])
+                            df.set_index("timestamp", inplace=True)
                             df.columns = [c.lower() for c in df.columns]
                             with HIST_LOCK:
-                                historical_dfs[interval][sym] = df
+                                store[sym["symbol"]] = df
+                        elif "exceeding access rate" in str(resp):
+                            logger.warning(f"Rate limit hit for {sym['symbol']} {interval}, backing off")
+                            time.sleep(10)
+                        else:
+                            logger.warning(f"No data for {sym['symbol']} {interval}")
                     except Exception as e:
-                        logger.error(f"Historical fetch error {sym} {interval}: {e}")
-                    time.sleep(1)  # avoid rate limits
-            logger.info("Historical data refreshed")
+                        logger.error(f"Error fetching {sym['symbol']} {interval}: {e}")
+                    time.sleep(2)  # prevent rate limits
+                time.sleep(1)
+            logger.info("Historical refresh cycle done")
         except Exception as e:
             logger.error(f"Historical refresher error: {e}")
         time.sleep(300)
 
-price_history = {"^NSEI": deque(maxlen=100), "^NSEBANK": deque(maxlen=100), "^BSESN": deque(maxlen=100)}
+# ==================== SIGNAL PROCESSING WITH PROPER SYNTHETIC CANDLES ====================
+# Maintain a rolling buffer of LTP for each symbol (max 2000 points)
+price_buffers = {sym["symbol"]: deque(maxlen=2000) for sym in SYMBOLS}
 
-def fetch_options_chain(symbol):
-    return {"pcr": 1.0, "max_oi_call": 0, "max_oi_put": 0, "total_oi": 0}
+def build_synthetic_candles(symbol, interval_seconds=60):
+    """Build 1-minute candles from tick buffer."""
+    buf = price_buffers.get(symbol, deque())
+    if len(buf) < 2:
+        return None
+    # Convert to numpy array
+    arr = np.array(list(buf))
+    times = arr[:, 0]  # timestamp
+    prices = arr[:, 1]  # price
+    # Group by minute
+    df = pd.DataFrame({"timestamp": times, "price": prices})
+    df["minute"] = df["timestamp"].dt.floor("min")
+    ohlc = df.groupby("minute").agg({
+        "price": ["first", "max", "min", "last"]
+    }).reset_index()
+    ohlc.columns = ["timestamp", "open", "high", "low", "close"]
+    ohlc.set_index("timestamp", inplace=True)
+    # Add dummy volume
+    ohlc["volume"] = 100
+    return ohlc
 
 def process_symbol(sym_info):
     sym = sym_info["symbol"]
     name = sym_info["name"]
     with CACHE_LOCK:
         ltp = GLOBAL_LIVE_FEED_CACHE.get(sym, {}).get("ltp", 0)
-    if ltp == 0: return None
-    price_history[sym].append(ltp)
-    if len(price_history[sym]) < 20: return None
+        ts = GLOBAL_LIVE_FEED_CACHE.get(sym, {}).get("timestamp")
+    if ltp == 0 or ts is None:
+        return None
 
-    hist = list(price_history[sym])
-    indices = pd.date_range(end=datetime.datetime.now(), periods=len(hist), freq='S')
-    df = pd.DataFrame({
-        "open": hist, "high": hist, "low": hist, "close": hist, "volume": 1
-    }, index=indices)
-    df["high"] = df["high"] * 1.0001
-    df["low"] = df["low"] * 0.9999
+    # Store tick in buffer
+    price_buffers[sym].append((ts, ltp))
 
+    # Build synthetic 1-minute candles
+    df_candles = build_synthetic_candles(sym, 60)
+    if df_candles is None or len(df_candles) < 20:
+        return None
+
+    # Use the last 100 candles
+    df = df_candles.tail(100).copy()
     closes = df["close"].values
     high = df["high"].values
     low = df["low"].values
     current = ltp
 
-    ema20 = calculate_ema(closes,20)[-1] if len(closes)>=20 else current
+    # Indicators
+    ema20 = calculate_ema(closes,20)[-1]
     ema50 = calculate_ema(closes,50)[-1] if len(closes)>=50 else current
     rsi = calculate_rsi(closes,14)
     atr = calculate_atr(high, low, closes, 14)
     vwap = calculate_vwap(df)
 
+    # Patterns
+    order_blocks = detect_order_blocks(df)
     bos, _ = detect_bos_choch(df)
+    liquidity = detect_liquidity_pools(df)
+    premium, discount, fib618 = calculate_premium_discount(df)
     mss, mss_type = detect_market_structure_shift(df)
-    crt_sig, _, sl, target, conf = detect_crt_setup(df)
-    ifvg_sig, _, _ = detect_ifvg(df)
+    crt_sig, entry_retest, sl, target, conf = detect_crt_setup(df)
+    ifvg_sig, ifvg_l, ifvg_u = detect_ifvg(df)
 
+    # Multi-timeframe (use historical_dfs if available, else neutral)
+    mtf_bias = {"5m":"NEUTRAL","15m":"NEUTRAL","1h":"NEUTRAL"}
+    with HIST_LOCK:
+        for tf in ["5m","15m","1h"]:
+            if sym in historical_dfs[tf]:
+                df_tf = historical_dfs[tf][sym]
+                if len(df_tf) > 0:
+                    mtf_bias[tf] = "BULLISH" if df_tf["close"].iloc[-1] > df_tf["close"].mean() else "BEARISH"
+
+    # Options PCR proxy
+    opt = {"pcr": 1.0, "max_oi_call": 0, "max_oi_put": 0, "total_oi": 0}
+    # SMT divergence (only NIFTY vs BANKNIFTY)
+    smt = False
+    smt_type = ""
+    if sym == "NIFTY" and "BANKNIFTY" in price_buffers and len(price_buffers["BANKNIFTY"]) > 20:
+        # Build synthetic for BANKNIFTY as well
+        df_bank = build_synthetic_candles("BANKNIFTY", 60)
+        if df_bank is not None and len(df_bank) > 20:
+            smt, smt_type, _ = detect_smt_divergence(df, df_bank.tail(100))
+
+    # Score calculation
     final_signal = 0
     score = 0
     if crt_sig != 0:
@@ -415,7 +593,15 @@ def process_symbol(sym_info):
         score += 1
     if bos and ((bos=="BOS_UP" and final_signal==1) or (bos=="BOS_DOWN" and final_signal==-1)):
         score += 1
-    if score < 4: return None
+    if mtf_bias.get("5m") == "BULLISH" and final_signal==1:
+        score += 1
+    elif mtf_bias.get("5m") == "BEARISH" and final_signal==-1:
+        score += 1
+    if smt and ((smt_type=="BULLISH" and final_signal==1) or (smt_type=="BEARISH" and final_signal==-1)):
+        score += 2
+
+    if score < 4:
+        return None
 
     action = "BUY" if final_signal == 1 else "SELL"
     entry_price = current
@@ -425,7 +611,8 @@ def process_symbol(sym_info):
     if not hourly_discount_filter(sym, current, action):
         return None
     lot, risk = position_size(CAPITAL_BASE, RISK_PERCENT, entry_price, stop_loss)
-    if lot <= 0: return None
+    if lot <= 0:
+        return None
 
     return {
         "timestamp": datetime.datetime.now().isoformat(),
@@ -563,10 +750,10 @@ def generate_chart(df, sym, action, entry, sl, target):
 
 # -------------------- Scanner --------------------
 async def run_scanner():
-    logger.info("Scanner started with yfinance")
+    logger.info("Scanner started (Angel One WebSocket mode)")
     last_trade_time = {}
     while True:
-        for sym_info in SYMBOLS_YF:
+        for sym_info in SYMBOLS:
             if sym_info["name"] != "Nifty 50":
                 continue
             trade = process_symbol(sym_info)
@@ -582,13 +769,11 @@ async def run_scanner():
                     f"Entry {trade['entry_price']:.2f} SL {trade['stop_loss']:.2f} Target {trade['target_price']:.2f}\n"
                     f"Lot {trade['lot_size']:.4f} Risk ₹{trade['risk_amount']:.2f} Score {trade['smc_score']}"
                 )
-                if sym in price_history and len(price_history[sym]) > 10:
-                    hist = list(price_history[sym])
-                    indices = pd.date_range(end=datetime.datetime.now(), periods=len(hist), freq='S')
-                    df_chart = pd.DataFrame({"close": hist}, index=indices)
-                    df_chart["timestamp"] = indices
+                # Build chart from synthetic candles
+                df_chart = build_synthetic_candles(trade["asset_symbol"], 60)
+                if df_chart is not None and len(df_chart) > 10:
                     loop = asyncio.get_running_loop()
-                    buf = await loop.run_in_executor(None, generate_chart, df_chart,
+                    buf = await loop.run_in_executor(None, generate_chart, df_chart.tail(100),
                                                      trade["asset_name"], trade["action"],
                                                      trade["entry_price"], trade["stop_loss"],
                                                      trade["target_price"])
@@ -614,7 +799,7 @@ async def trade_management_loop():
 
 # -------------------- Telegram Bot --------------------
 async def start_cmd(update, ctx):
-    await update.message.reply_text("Bot active (yfinance mode). Commands: /status, /ledger, /positions, /close <id>")
+    await update.message.reply_text("Bot active (Angel One). Commands: /status, /ledger, /positions, /close <id>")
 async def status_cmd(update, ctx):
     await update.message.reply_text(f"✅ Running. Auto trade: {ENABLE_AUTO_TRADE}, Active trades: {len(trade_mgr.active)}")
 async def ledger_cmd(update, ctx):
@@ -673,7 +858,7 @@ flask_app = flask.Flask(__name__)
 
 @flask_app.route("/")
 def index():
-    return "Indian Indices Scalping Bot - Running (yfinance mode)"
+    return "Indian Indices Scalping Bot - Running (Angel One)"
 
 @flask_app.route("/test_telegram")
 def test_telegram():
@@ -711,11 +896,12 @@ def main():
     conn.close()
 
     # Start threads
-    threading.Thread(target=yfinance_live_feed, daemon=True).start()
+    threading.Thread(target=angel_websocket_engine, daemon=True).start()
     threading.Thread(target=historical_refresher, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=run_telegram_bot, daemon=True).start()
 
+    # Async loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_scanner())
