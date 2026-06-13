@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-INDIAN INDICES SCALPING BOT - ANGEL ONE (FIXED)
-- Robust token fetch with exponential backoff
-- Proper synthetic candle builder from live ticks
+INDIAN INDICES SCALPING BOT - ANGEL ONE (FINAL FIXED)
+- Exact token matching with `symboltoken`
+- Exponential backoff retry
 """
 
 import asyncio
@@ -163,15 +163,22 @@ class FootprintAnalyzer:
 
 footprint = FootprintAnalyzer()
 
-# -------------------- Token Fetch with Retry --------------------
+# -------------------- Token Fetch with Retry (FIXED) --------------------
 def fetch_token_with_retry(obj, exchange, symbol, max_retries=5):
-    """Fetch token with exponential backoff."""
+    """Fetch token with exponential backoff and exact symbol matching."""
     for attempt in range(max_retries):
         try:
             resp = obj.searchScrip(exchange, symbol)
             if resp.get('status') and resp.get('data'):
-                token = str(resp['data'][0]['token'])
-                logger.info(f"Fetched token for {symbol}: {token}")
+                # Search for exact matching tradingsymbol (case-insensitive)
+                for item in resp['data']:
+                    if item.get('tradingsymbol', '').upper() == symbol.upper():
+                        token = str(item['symboltoken'])   # note: 'symboltoken' not 'token'
+                        logger.info(f"Fetched token for {symbol}: {token}")
+                        return token
+                # If exact match not found, warn and try first item (fallback)
+                logger.warning(f"Exact match for {symbol} not found, using first result")
+                token = str(resp['data'][0]['symboltoken'])
                 return token
             else:
                 logger.warning(f"Token fetch attempt {attempt+1} for {symbol} failed: {resp.get('message')}")
@@ -180,7 +187,7 @@ def fetch_token_with_retry(obj, exchange, symbol, max_retries=5):
         time.sleep(2 ** attempt)  # 1,2,4,8,16 sec
     return None
 
-# -------------------- Angel One WebSocket (Fixed) --------------------
+# -------------------- Angel One WebSocket --------------------
 def angel_websocket_engine():
     backoff = 2
     max_backoff = 60
@@ -497,7 +504,6 @@ def historical_refresher():
         time.sleep(300)
 
 # ==================== SIGNAL PROCESSING WITH PROPER SYNTHETIC CANDLES ====================
-# Maintain a rolling buffer of LTP for each symbol (max 2000 points)
 price_buffers = {sym["symbol"]: deque(maxlen=2000) for sym in SYMBOLS}
 
 def build_synthetic_candles(symbol, interval_seconds=60):
@@ -505,11 +511,9 @@ def build_synthetic_candles(symbol, interval_seconds=60):
     buf = price_buffers.get(symbol, deque())
     if len(buf) < 2:
         return None
-    # Convert to numpy array
     arr = np.array(list(buf))
-    times = arr[:, 0]  # timestamp
-    prices = arr[:, 1]  # price
-    # Group by minute
+    times = arr[:, 0]
+    prices = arr[:, 1]
     df = pd.DataFrame({"timestamp": times, "price": prices})
     df["minute"] = df["timestamp"].dt.floor("min")
     ohlc = df.groupby("minute").agg({
@@ -517,7 +521,6 @@ def build_synthetic_candles(symbol, interval_seconds=60):
     }).reset_index()
     ohlc.columns = ["timestamp", "open", "high", "low", "close"]
     ohlc.set_index("timestamp", inplace=True)
-    # Add dummy volume
     ohlc["volume"] = 100
     return ohlc
 
@@ -530,29 +533,24 @@ def process_symbol(sym_info):
     if ltp == 0 or ts is None:
         return None
 
-    # Store tick in buffer
     price_buffers[sym].append((ts, ltp))
 
-    # Build synthetic 1-minute candles
     df_candles = build_synthetic_candles(sym, 60)
     if df_candles is None or len(df_candles) < 20:
         return None
 
-    # Use the last 100 candles
     df = df_candles.tail(100).copy()
     closes = df["close"].values
     high = df["high"].values
     low = df["low"].values
     current = ltp
 
-    # Indicators
     ema20 = calculate_ema(closes,20)[-1]
     ema50 = calculate_ema(closes,50)[-1] if len(closes)>=50 else current
     rsi = calculate_rsi(closes,14)
     atr = calculate_atr(high, low, closes, 14)
     vwap = calculate_vwap(df)
 
-    # Patterns
     order_blocks = detect_order_blocks(df)
     bos, _ = detect_bos_choch(df)
     liquidity = detect_liquidity_pools(df)
@@ -561,7 +559,6 @@ def process_symbol(sym_info):
     crt_sig, entry_retest, sl, target, conf = detect_crt_setup(df)
     ifvg_sig, ifvg_l, ifvg_u = detect_ifvg(df)
 
-    # Multi-timeframe (use historical_dfs if available, else neutral)
     mtf_bias = {"5m":"NEUTRAL","15m":"NEUTRAL","1h":"NEUTRAL"}
     with HIST_LOCK:
         for tf in ["5m","15m","1h"]:
@@ -570,18 +567,14 @@ def process_symbol(sym_info):
                 if len(df_tf) > 0:
                     mtf_bias[tf] = "BULLISH" if df_tf["close"].iloc[-1] > df_tf["close"].mean() else "BEARISH"
 
-    # Options PCR proxy
     opt = {"pcr": 1.0, "max_oi_call": 0, "max_oi_put": 0, "total_oi": 0}
-    # SMT divergence (only NIFTY vs BANKNIFTY)
     smt = False
     smt_type = ""
     if sym == "NIFTY" and "BANKNIFTY" in price_buffers and len(price_buffers["BANKNIFTY"]) > 20:
-        # Build synthetic for BANKNIFTY as well
         df_bank = build_synthetic_candles("BANKNIFTY", 60)
         if df_bank is not None and len(df_bank) > 20:
             smt, smt_type, _ = detect_smt_divergence(df, df_bank.tail(100))
 
-    # Score calculation
     final_signal = 0
     score = 0
     if crt_sig != 0:
@@ -769,7 +762,6 @@ async def run_scanner():
                     f"Entry {trade['entry_price']:.2f} SL {trade['stop_loss']:.2f} Target {trade['target_price']:.2f}\n"
                     f"Lot {trade['lot_size']:.4f} Risk ₹{trade['risk_amount']:.2f} Score {trade['smc_score']}"
                 )
-                # Build chart from synthetic candles
                 df_chart = build_synthetic_candles(trade["asset_symbol"], 60)
                 if df_chart is not None and len(df_chart) > 10:
                     loop = asyncio.get_running_loop()
@@ -876,7 +868,6 @@ def run_flask():
 # -------------------- Main --------------------
 def main():
     init_database()
-    # Rebuild DB from CSV if needed
     conn = sqlite3.connect("trades.db")
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM trades")
@@ -895,13 +886,11 @@ def main():
         logger.info("Database restored from CSV backup")
     conn.close()
 
-    # Start threads
     threading.Thread(target=angel_websocket_engine, daemon=True).start()
     threading.Thread(target=historical_refresher, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=run_telegram_bot, daemon=True).start()
 
-    # Async loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_scanner())
