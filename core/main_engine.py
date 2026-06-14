@@ -11,7 +11,7 @@ import time
 import logging
 from typing import Optional
 
-from ..config.config import Config
+from config.config import Config
 from ..database.database_manager import DatabaseManager
 from ..broker.angel_client import AngelOneClient
 from ..broker.websocket_manager import WebSocketManager
