@@ -8,9 +8,9 @@
 # ============================================================================
 
 from typing import Dict, List
-from ..broker.angel_client import AngelOneClient
-from ..database.database_manager import DatabaseManager
-from ..risk.position_manager import PositionManager
+from broker.angel_client import AngelOneClient
+from database.database_manager import DatabaseManager
+from risk.position_manager import PositionManager
 
 class IntegrityChecker:
     def __init__(self, broker: AngelOneClient, db: DatabaseManager, pos_mgr: PositionManager):

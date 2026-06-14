@@ -13,7 +13,7 @@ import queue
 from telegram import Bot
 from telegram.error import TelegramError
 
-from ..config.config import Config
+from config.config import Config
 
 class TelegramNotifier:
     def __init__(self):

@@ -9,10 +9,10 @@
 
 import asyncio
 from typing import List
-from ..config.config import Config
-from ..broker.angel_client import AngelOneClient
-from ..notifications.telegram_notifier import TelegramNotifier
-from ..database.database_manager import DatabaseManager
+from config.config import Config
+from broker.angel_client import AngelOneClient
+from notifications.telegram_notifier import TelegramNotifier
+from database.database_manager import DatabaseManager
 
 class StartupValidator:
     def __init__(self, broker: AngelOneClient, telegram: TelegramNotifier, db: DatabaseManager):

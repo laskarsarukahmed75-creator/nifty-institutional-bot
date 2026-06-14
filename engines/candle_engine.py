@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, List
 import numpy as np
 
-from ..config.config import Config
+from config.config import Config
 
 class CandleEngine:
     def __init__(self):

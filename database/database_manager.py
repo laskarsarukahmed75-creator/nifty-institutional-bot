@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from functools import wraps
 import time
 
-from ..config.config import Config
+from config.config import Config
 
 def retry_on_lock(max_retries=3, delay=0.1):
     def decorator(func):

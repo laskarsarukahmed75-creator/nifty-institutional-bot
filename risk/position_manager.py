@@ -11,8 +11,8 @@ import threading
 from datetime import datetime
 from typing import Dict, Optional
 
-from ..config.config import Config
-from ..database.database_manager import DatabaseManager
+from config.config import Config
+from database.database_manager import DatabaseManager
 
 class PositionManager:
     def __init__(self, db: DatabaseManager):

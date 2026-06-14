@@ -9,7 +9,7 @@
 
 from typing import Dict, List, Any
 from .angel_client import AngelOneClient
-from ..database.database_manager import DatabaseManager
+from database.database_manager import DatabaseManager
 
 class BrokerSync:
     def __init__(self, broker: AngelOneClient, db: DatabaseManager):

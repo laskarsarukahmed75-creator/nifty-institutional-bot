@@ -10,7 +10,7 @@
 import pandas as pd
 from datetime import datetime
 from typing import List, Dict
-from ..config.config import Config
+from config.config import Config
 from .smc_engine import SMCEngine
 from .candle_engine import CandleEngine
 

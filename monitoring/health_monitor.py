@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any
 
-from ..database.database_manager import DatabaseManager
+from database.database_manager import DatabaseManager
 
 class HealthMonitor:
     def __init__(self, ws_manager: Any, telegram: Any, db: DatabaseManager):

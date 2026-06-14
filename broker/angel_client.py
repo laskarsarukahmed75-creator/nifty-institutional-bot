@@ -15,8 +15,8 @@ import threading
 from typing import Optional, Dict, List, Any
 from SmartApi import SmartConnect
 
-from ..config.config import Config
-from ..database.database_manager import DatabaseManager
+from config.config import Config
+from database.database_manager import DatabaseManager
 
 class AngelOneClient:
     def __init__(self, db: DatabaseManager = None):

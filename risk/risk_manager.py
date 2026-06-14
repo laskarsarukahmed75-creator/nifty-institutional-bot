@@ -12,8 +12,8 @@ from datetime import datetime
 from typing import Dict, Optional
 import numpy as np
 
-from ..config.config import Config
-from ..database.database_manager import DatabaseManager
+from config.config import Config
+from database.database_manager import DatabaseManager
 from .position_manager import PositionManager
 from .oco_manager import OCOManager
 

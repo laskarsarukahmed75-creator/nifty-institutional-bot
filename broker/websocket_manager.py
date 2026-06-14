@@ -15,8 +15,8 @@ from typing import List, Set, Callable, Optional
 
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
-from ..config.config import Config
-from ..database.database_manager import DatabaseManager
+from config.config import Config
+from database.database_manager import DatabaseManager
 
 class WebSocketManager:
     def __init__(self, auth_token: str, api_key: str, client_id: str, feed_token: str, db: DatabaseManager = None):

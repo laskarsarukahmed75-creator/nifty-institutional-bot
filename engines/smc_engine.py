@@ -9,7 +9,7 @@
 
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict
-from ..config.config import Config
+from config.config import Config
 from .candle_engine import CandleEngine
 
 class SMCEngine:

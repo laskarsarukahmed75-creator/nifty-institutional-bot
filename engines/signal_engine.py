@@ -9,7 +9,7 @@
 
 from typing import Optional, Dict
 from .smc_engine import SMCEngine
-from ..risk.risk_manager import RiskManager
+from risk.risk_manager import RiskManager
 
 class SignalEngine:
     def __init__(self, smc_engine: SMCEngine, risk_manager: RiskManager):
