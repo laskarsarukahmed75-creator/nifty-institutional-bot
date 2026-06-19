@@ -29,10 +29,25 @@ try:
 except ImportError:
     from database_manager import DatabaseManager
 
+# Dynamic Broker Import to handle naming mismatch
 try:
-    from broker.angel_client import AngelOneClient
-except ImportError:
-    from angel_client import AngelOneClient
+    import broker.angel_client as angel_module
+    if hasattr(angel_module, 'AngelOneClient'):
+        AngelOneClient = angel_module.AngelOneClient
+    elif hasattr(angel_module, 'AngelSmartConnect'):
+        AngelOneClient = angel_module.AngelSmartConnect
+    else:
+        # Fallback to whatever class is available inside the module
+        classes = [v for k, v in vars(angel_module).items() if isinstance(v, type)]
+        if classes:
+            AngelOneClient = classes[0]
+        else:
+            raise ImportError("No class found in broker.angel_client")
+except Exception as e:
+    try:
+        from broker.angel_client import AngelOneClient
+    except ImportError:
+        from angel_client import AngelOneClient
 
 try:
     from risk.risk_manager import RiskManager
