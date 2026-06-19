@@ -100,3 +100,8 @@ class PositionManager:
 # ============================================================================
 # END MODULE: PositionManager
 # ============================================================================
+
+    def get_positions_by_symbol(self, symbol: str) -> List[Dict]:
+        """Return all open positions for a given symbol."""
+        with self._lock:
+            return [pos for pos in self._positions.values() if pos['symbol'] == symbol]
