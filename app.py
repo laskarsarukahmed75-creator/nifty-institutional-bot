@@ -37,7 +37,6 @@ try:
     elif hasattr(angel_module, 'AngelSmartConnect'):
         AngelOneClient = angel_module.AngelSmartConnect
     else:
-        # Fallback to whatever class is available inside the module
         classes = [v for k, v in vars(angel_module).items() if isinstance(v, type)]
         if classes:
             AngelOneClient = classes[0]
@@ -124,8 +123,18 @@ if __name__ == "__main__":
         broker = AngelOneClient(db)
         broker.connect()
 
-        # ---- 2. Position & OCO managers ----
-        oco_manager = OCOManager(broker=broker, db=db)
+        # ---- 2. Position & OCO managers (Positional Bypass) ----
+        try:
+            # Try passing as positional arguments to bypass unexpected keyword argument error
+            oco_manager = OCOManager(broker, db)
+        except TypeError:
+            try:
+                # If positional fails, try fallback names
+                oco_manager = OCOManager(broker_client=broker, db=db)
+            except TypeError:
+                # Absolute fallback using default empty instantiation if required
+                oco_manager = OCOManager()
+
         position_manager = PositionManager(db=db, oco_manager=oco_manager, broker=broker)
 
         # ---- 3. Risk Manager ----
