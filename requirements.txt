@@ -6,3 +6,4 @@ gunicorn
 smartapi-python
 python-telegram-bot
 logzero
+websocket-client
