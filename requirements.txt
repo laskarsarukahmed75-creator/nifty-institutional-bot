@@ -5,3 +5,4 @@ python-dotenv
 gunicorn
 smartapi-python
 python-telegram-bot
+logzero
