@@ -16,7 +16,8 @@ class MainEngine:
 
     async def start(self):
         logger.info("[ENGINE] Nifty Institutional Main Engine Core Online.")
-        asyncio.create_task(self._signal_loop())
+        # प्रोग्राम को हमेशा जिंदा रखने के लिए बैकग्राउंड टास्क की जगह सीधे await करेंगे
+        await self._signal_loop()
 
     def _on_tick(self, tick_data: dict):
         logger.info(f"[TICK] Processing live tick data for symboltoken: {tick_data.get('symboltoken')}")
@@ -24,6 +25,8 @@ class MainEngine:
             self.candle_engine.update("NIFTY50", tick_data)
 
     async def _signal_loop(self):
+        # रेंडर लॉग्स में साफ़ दिखने के लिए एक स्टार्टिंग मैसेज जोड़ दिया है
+        logger.info("[LOOP] Starting continuous institutional strategy scanner...")
         while self._running:
             try:
                 for symbol in Config.SYMBOLS:
