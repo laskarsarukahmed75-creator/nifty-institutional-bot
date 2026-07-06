@@ -9,18 +9,13 @@ logger = logging.getLogger(__name__)
 async def start_app():
     logger.info("🚀 INITIALIZING UNIVERSAL BULLETPROOF ARCHITECTURE v7.0.0")
     
-    # Initialize Telegram
     telegram = TelegramNotifier()
-    try:
-        # यहाँ हमने 'send_text_alert' को बदलकर सही नाम 'send' कर दिया है!
-        telegram.send("🚀 Nifty Bot Startup Test Message: Engine Engaged via Correct Pipeline!")
-        logger.info("[TELEGRAM] Startup test message queued successfully.")
-    except Exception as e:
-        logger.error(f"[TELEGRAM] Startup test message failed: {e}")
-
-    # Start the core engine
     engine = MainEngine(telegram=telegram)
     await engine.start()
+    
+    # यह जादुई लाइन रेंडर को टाइम आउट भी नहीं होने देगी और प्रोग्राम को बंद (Exited early) भी नहीं होने देगी
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     try:
