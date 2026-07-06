@@ -116,8 +116,8 @@ if __name__ == "__main__":
             position_manager=position_manager,
             capital=Config.CAPITAL,
             risk_per_trade_percent=Config.RISK_PER_TRADE_PERCENT,
-            daily_loss_limit=Config.DAILY_LOSS_LIMIT,
-            daily_profit_target=Config.DAILY_PROFIT_TARGET
+            daily_loss_limit=getattr(Config, "DAILY_LOSS_LIMIT", 2000),
+            daily_profit_target=getattr(Config, "DAILY_PROFIT_TARGET", 5000)
         )
 
         engine = MainEngine(
