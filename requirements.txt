@@ -8,3 +8,4 @@ python-telegram-bot
 logzero
 websocket-client
 numpy
+pyotp>=2.9.0
