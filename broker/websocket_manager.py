@@ -1,61 +1,79 @@
 #!/usr/bin/env python3
-"""
-websocket_manager.py – Nifty 50 Live WebSocket Data Stream & Event Bus Routing
-"""
-import asyncio
-import json
+import threading
+import time
 import logging
-from typing import Dict
-from core.event_bus import EventBus
+from typing import Optional, Dict, Callable, List
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+from config.config import Config
 
 logger = logging.getLogger(__name__)
 
 class WebSocketManager:
-    def __init__(self, event_bus: EventBus):
-        from broker.smart_connect_client import SmartConnectClient  # Angel One Client
-        self.client = SmartConnectClient()
-        self.event_bus = event_bus
-        self._running = False
-        self._tasks = []
+    def __init__(self, auth_token: str, api_key: str, client_id: str, feed_token: str):
+        self.auth_token = auth_token
+        self.api_key = api_key
+        self.client_id = client_id
+        self.feed_token = feed_token
+        self.ws = None
+        self._connected = False
+        self._stop_flag = False
+        self._on_tick: Optional[Callable] = None
+        self._worker_thread = None
 
-    async def connect(self) -> None:
-        self._running = True
-        await self.client.connect_websocket()
-        # Nifty 50 Institutional Stream Token Binding
-        await self.client.subscribe_symbols() 
-        self._tasks.append(asyncio.create_task(self._listen()))
-        logger.info("Nifty 50 WebSocket Manager Live: Subscribed and routing to MARKET_DATA.")
+    def set_callback(self, callback: Callable):
+        self._on_tick = callback
 
-    async def _listen(self) -> None:
-        while self._running:
+    def connect(self):
+        self._worker_thread = threading.Thread(target=self._ws_loop, daemon=True)
+        self._worker_thread.start()
+
+    def subscribe(self, tokens: List[str]):
+        self._subscribed_tokens = tokens
+        if self._connected and self.ws:
+            self._do_subscribe()
+
+    def _ws_loop(self):
+        while not self._stop_flag:
             try:
-                if not self.client._ws:
-                    await self.client.connect_websocket()
-                message = await self.client._ws.recv()
-                data = json.loads(message)
-                await self._process_message(data)
+                self.ws = SmartWebSocketV2(self.auth_token, self.api_key, self.client_id, self.feed_token)
+                self.ws.on_open = self._on_open
+                self.ws.on_data = self._on_data
+                self.ws.on_error = self._on_error
+                self.ws.on_close = self._on_close
+                logger.info("[WS] Angel One WebSocket connecting...")
+                self.ws.connect()
             except Exception as e:
-                logger.error(f"Nifty WS Loop Error: {e}")
-                await asyncio.sleep(5)
+                logger.error(f"[WS ERROR] WebSocket loop error: {e}")
+                time.sleep(5)
 
-    async def _process_message(self, data: Dict) -> None:
-        # Check for live tick data structures from Angel One
-        if data and "token" in data:
-            candle = {
-                "symbol": "NIFTY50",
-                "timestamp": data.get("timestamp"),
-                "open": float(data.get("open", 0)),
-                "high": float(data.get("high", 0)),
-                "low": float(data.get("low", 0)),
-                "close": float(data.get("close", 0)),
-                "volume": float(data.get("volume", 0))
-            }
-            # Direct injection into event bus pipeline
-            await self.event_bus.publish("MARKET_DATA", candle)
+    def _on_open(self, wsapp):
+        self._connected = True
+        logger.info("[WS] WebSocket opened successfully. Subscribing to tokens...")
+        self._do_subscribe()
 
-    async def stop(self) -> None:
-        self._running = False
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        await self.client.close()
+    def _on_data(self, wsapp, message, data_type, continue_flag):
+        try:
+            if self._on_tick and isinstance(message, dict):
+                tick = {
+                    'symboltoken': message.get('symboltoken') or message.get('token'),
+                    'ltp': message.get('ltp') or message.get('last_traded_price'),
+                    'volume': message.get('volume', 0)
+                }
+                if tick['symboltoken'] and tick['ltp']:
+                    self._on_tick(tick)
+        except Exception as e:
+            logger.error(f"[WS ERROR] Tick parsing error: {e}")
+
+    def _on_error(self, wsapp, error, extra=None):
+        logger.error(f"[WS ERROR] WebSocket error observed: {error}")
+        self._connected = False
+
+    def _on_close(self, wsapp, close_status_code=1000, close_msg=""):
+        logger.warning(f"[WS] WebSocket closed: {close_status_code}")
+        self._connected = False
+
+    def _do_subscribe(self):
+        if self._connected and self.ws and hasattr(self, '_subscribed_tokens'):
+            token_list = [{"exchangeType": 1, "tokens": self._subscribed_tokens}]
+            self.ws.subscribe("live_data", 1, token_list)
+            logger.info(f"[WS] Subscribed to tokens: {self._subscribed_tokens}")
