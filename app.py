@@ -108,7 +108,7 @@ if __name__ == "__main__":
         logger.info(f"[BOOT] Feed Token: {broker.feed_token[:10]}...")
 
         oco_manager = OCOManager()
-        position_manager = PositionManager(db=db, oco_manager=oco_manager, broker=broker)
+        position_manager = PositionManager(db, oco_manager, broker)
 
         risk_manager = RiskManager(
             db=db,
