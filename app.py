@@ -112,7 +112,6 @@ if __name__ == "__main__":
 
         risk_manager = RiskManager(
             db=db,
-            candle_engine=None,
             position_manager=position_manager,
             capital=Config.CAPITAL,
             risk_per_trade_percent=Config.RISK_PER_TRADE_PERCENT,
