@@ -107,7 +107,7 @@ if __name__ == "__main__":
         logger.info(f"[BOOT] Angel One connected. Auth Token: {broker.auth_token[:10]}...")
         logger.info(f"[BOOT] Feed Token: {broker.feed_token[:10]}...")
 
-        oco_manager = OCOManager(broker=broker, db=db)
+        oco_manager = OCOManager(broker_client=broker, db=db)
         position_manager = PositionManager(db=db, oco_manager=oco_manager, broker=broker)
 
         risk_manager = RiskManager(
