@@ -2,9 +2,8 @@
 import threading
 import time
 import logging
-from typing import Optional, Dict, Callable, List
+from typing import Optional, Callable, List
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-from config.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +39,21 @@ class WebSocketManager:
                 self.ws.on_data = self._on_data
                 self.ws.on_error = self._on_error
                 self.ws.on_close = self._on_close
-                logger.info("[WS] Angel One WebSocket connecting...")
+                logger.info("[WS] Connecting to Angel One Live Feed...")
                 self.ws.connect()
             except Exception as e:
-                logger.error(f"[WS ERROR] WebSocket loop error: {e}")
+                logger.error(f"[WS ERROR] Connection failed: {e}")
                 time.sleep(5)
 
-    def _on_open(self, wsapp):
+    def _on_open(self, *args, **kwargs):
         self._connected = True
-        logger.info("[WS] WebSocket opened successfully. Subscribing to tokens...")
+        logger.info("[WS] WebSocket connected! Requesting subscription...")
         self._do_subscribe()
 
-    def _on_data(self, wsapp, message, data_type, continue_flag):
+    def _on_data(self, *args, **kwargs):
         try:
+            # websocket-client वर्ज़न के हिसाब से डेटा निकालना
+            message = args[1] if len(args) > 1 else args[0]
             if self._on_tick and isinstance(message, dict):
                 tick = {
                     'symboltoken': message.get('symboltoken') or message.get('token'),
@@ -62,18 +63,24 @@ class WebSocketManager:
                 if tick['symboltoken'] and tick['ltp']:
                     self._on_tick(tick)
         except Exception as e:
-            logger.error(f"[WS ERROR] Tick parsing error: {e}")
+            pass
 
-    def _on_error(self, wsapp, error, extra=None):
-        logger.error(f"[WS ERROR] WebSocket error observed: {error}")
+    def _on_error(self, *args, **kwargs):
+        logger.error(f"[WS ERROR] Error wrapper triggered: {args}")
         self._connected = False
 
-    def _on_close(self, wsapp, close_status_code=1000, close_msg=""):
-        logger.warning(f"[WS] WebSocket closed: {close_status_code}")
+    def _on_close(self, *args, **kwargs):
+        logger.warning("[WS] WebSocket connection closed safely.")
         self._connected = False
 
     def _do_subscribe(self):
         if self._connected and self.ws and hasattr(self, '_subscribed_tokens'):
             token_list = [{"exchangeType": 1, "tokens": self._subscribed_tokens}]
             self.ws.subscribe("live_data", 1, token_list)
-            logger.info(f"[WS] Subscribed to tokens: {self._subscribed_tokens}")
+            logger.info(f"[WS] Active subscription on tokens: {self._subscribed_tokens}")
+
+    def stop(self):
+        self._stop_flag = True
+        if self.ws:
+            try: self.ws.close()
+            except: pass
