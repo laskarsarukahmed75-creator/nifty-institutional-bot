@@ -1,3 +1,21 @@
+import sys
+import subprocess
+
+# अगर रेंडर के कैश में लाइब्रेरी गायब मिले, तो कोड खुद उसे रनटाइम पर इंस्टॉल करेगा
+try:
+    from SmartApi import SmartConnect
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+except ImportError:
+    print("[SYSTEM] smartapi-python not found in path. Forcing emergency runtime install...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "smartapi-python>=1.5.5", "requests>=2.31.0", "python-dotenv>=1.0.0"])
+    # इंस्टॉल करने के बाद पाथ को रिफ्रेश करें ताकि पाइथन को लाइब्रेरी दिख जाए
+    import site
+    from importlib import reload
+    reload(site)
+    from SmartApi import SmartConnect
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+    print("[SYSTEM] Emergency install successful! Continuing boot...")
+
 #!/usr/bin/env python3
 """
 bot.py – Single‑file Institutional SMC Trading Bot (Angel One)
