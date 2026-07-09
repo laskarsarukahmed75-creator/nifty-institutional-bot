@@ -4,7 +4,7 @@ import json
 import datetime
 from typing import Optional, List, Dict, Any
 
-DB_PATH = "sbniftybot.db"
+DB_PATH = "niftyinstitutionalbot.db"
 
 class DBHandler:
     def __init__(self, db_path: str = DB_PATH):
