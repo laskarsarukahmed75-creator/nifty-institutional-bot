@@ -18,7 +18,7 @@ def health_check():
     status = "running" if engine and engine.running else "stopped"
     return jsonify({
         "status": "active" if status == "running" else "inactive",
-        "message": "SBNiftybot is operational",
+        "message": "niftyinstitutionalbot is operational",
         "engine_status": status
     })
 
