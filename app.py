@@ -4,76 +4,61 @@ import time
 import logging
 import threading
 import datetime
-import sys
-from typing import Optional, Dict, List, Tuple, Union, Any
+import math
+from typing import Optional, Dict, List, Tuple, Any
+import pyotp
 
-# ---------- 🛡️ एंजेल वन बुलेटप्रूफ इम्पोर्ट राउटर ----------
-SmartConnectException = Exception # पहले से ही एक सुरक्षित फलबैक बना दिया
-
+# ---------- Robust SmartConnect Import ----------
 try:
-    from SmartApi import SmartConnect
+    from smartapi import SmartConnect
+    from smartapi.smartConnect import SmartConnectException
+except (ImportError, ModuleNotFoundError):
     try:
-        from SmartApi.smartConnect import SmartConnectException
-    except Exception:
-        pass
-except ImportError:
-    try:
-        from smartapi import SmartConnect
-        try:
-            from smartapi.smartConnect import SmartConnectException
-        except Exception:
-            pass
-    except ImportError:
-        try:
-            from SmartConnect import SmartConnect
-        except ImportError:
-            # अगर पूरी लाइब्रेरी ही गायब होगी, केवल तभी यह क्रैश करेगा
-            raise ImportError("CRITICAL: SmartApi package not found in virtualenv!")
+        from SmartConnect import SmartConnect
+        SmartConnectException = Exception
+    except (ImportError, ModuleNotFoundError):
+        from smartapi.smartConnect import SmartConnect
+        SmartConnectException = Exception
 
-# Local modules
 from db_handler import DBHandler
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NiftyInstitutionalEngine")
 
 class NiftyInstitutionalEngine:
-    """
-    Hedge-Fund Grade 0.5 Clone Vector Engine.
-    All original logic preserved with Advanced Historical Trend Validation & Render Fixes.
-    """
-
-    # Angel One credentials from environment
+    # ---------- Environment Variables ----------
     API_KEY = os.environ.get("ANGEL_API_KEY", "")
     CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID", "")
     PASSWORD = os.environ.get("ANGEL_PASSWORD", "")
     TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET", None)
 
-    # Trading parameters
     TRADE_SYMBOL = os.environ.get("TRADE_SYMBOL", "NIFTY").upper()
-    INSTRUMENT_TYPE = "NSE"          
+    INSTRUMENT_TYPE = "NSE"
     PRODUCT_TYPE = "INTRADAY"
-    TIMEFRAME = "5m"                
+    TIMEFRAME = "5m"
 
-    # Risk parameters
-    SL_BUFFER_POINTS = 4.0          
-    RISK_REWARD_RATIO = 10.0        
-    TOLERANCE = 0.5                 
-    QUANTITY = int(os.environ.get("TRADE_QUANTITY", 65))
+    SL_BUFFER_POINTS = 4.0
+    RISK_REWARD_RATIO = 10.0
+    TOLERANCE = 0.5
+    LOOKBACK_CANDLES = 150
+    QUANTITY = int(os.environ.get("TRADE_QUANTITY", 25))
 
-    # Symbol token mapping
+    MIN_VOLUME = 100000
+    MIN_ATR = 20.0
+    LOCK_POINT_BUFFER = 2.0
+
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
     SYMBOL_TOKENS = {
         "NIFTY": 99926000,
         "BANKNIFTY": 99926009,
         "SENSEX": 99926010,
     }
 
-    # Lookback settings for high-accuracy historical data
-    LOOKBACK_CANDLES = 150          
-
     def __init__(self):
         if not self.API_KEY or not self.CLIENT_ID or not self.PASSWORD:
-            raise ValueError("Angel One credentials not set in environment.")
+            raise ValueError("Missing Angel One credentials.")
 
         self.db = DBHandler()
         self.obj: Optional[SmartConnect] = None
@@ -87,50 +72,75 @@ class NiftyInstitutionalEngine:
         if not self.token:
             raise ValueError(f"Symbol {self.symbol} not in token map.")
 
-        # State
         self.position_open = False
-        self.last_entry_time = None
-        self.order_ids = []          
+        self.order_ids = []
         self._lock = threading.Lock()
+        self._entry_triggered = False
+        self.running = False
+        self.paused = False
+        self.last_trade_side = None
 
         # Vector tracking
         self.last_swing_high = None
         self.last_swing_low = None
         self.last_vector_length = None
         self.pivot_0_5 = None
+        self.lock_point = None
+        self.structure_reset = False
 
-        # Parent vector info
         self.parent_swing_high = None
         self.parent_swing_low = None
         self.parent_length = None
         self.parent_completed = False
 
-        self._entry_triggered = False
-        self.running = False
+        self.trendline_highs = []
+        self.trendline_lows = []
+        self.last_15m_ohlc = None
 
-        logger.info("Engine initialised with Institutional Trend Scanner.")
+        logger.info("Engine initialised.")
 
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
+    # ---------- Telegram ----------
+    def _send_telegram(self, message: str):
+        if self.TELEGRAM_TOKEN and self.TELEGRAM_CHAT_ID:
+            try:
+                import requests
+                url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/sendMessage"
+                payload = {"chat_id": self.TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+                requests.post(url, json=payload, timeout=5)
+            except Exception as e:
+                logger.warning(f"Telegram send failed: {e}")
+
+    # ---------- Authentication ----------
     def _login(self) -> None:
         logger.info("Logging in to Angel One...")
         try:
             self.obj = SmartConnect(api_key=self.API_KEY)
+            totp = None
+            if self.TOTP_SECRET:
+                try:
+                    totp = pyotp.TOTP(self.TOTP_SECRET).now()
+                except Exception as e:
+                    logger.error(f"TOTP generation error: {e}")
+                    self._send_telegram(f"❌ TOTP generation failed: {e}")
+                    raise
             data = self.obj.generateSession(
                 clientCode=self.CLIENT_ID,
                 password=self.PASSWORD,
-                totp=self.TOTP_SECRET
+                totp=totp
             )
             if not data or data.get('status') is False:
-                raise SmartConnectException(f"Login failed: {data}")
+                error_msg = data.get('message', 'Unknown error')
+                self._send_telegram(f"❌ Login failed: {error_msg}")
+                raise Exception(f"Login failed: {data}")
             self.auth_token = data.get('data', {}).get('jwtToken')
             self.refresh_token = data.get('data', {}).get('refreshToken')
             self.feed_token = self.obj.getfeedToken()
             self.user_profile = data.get('data', {}).get('userProfile')
             logger.info("Login successful.")
+            self._send_telegram("✅ <b>Angel One Login Successful</b>")
         except Exception as e:
             logger.error(f"Login error: {e}")
+            self._send_telegram(f"❌ Login failed: {e}")
             raise
 
     def _renew_session(self) -> None:
@@ -143,286 +153,291 @@ class NiftyInstitutionalEngine:
         except Exception:
             self._renew_session()
 
-    # ------------------------------------------------------------------
-    # Market Data
-    # ------------------------------------------------------------------
-    def _get_ltp(self, symbol: Optional[str] = None) -> float:
-        sym = symbol or self.symbol
-        token = self.SYMBOL_TOKENS.get(sym)
-        if not token:
-            raise ValueError(f"Unknown symbol: {sym}")
-        try:
-            resp = self.obj.ltpData(
-                exchange=self.INSTRUMENT_TYPE,
-                tradingsymbol=sym,
-                symboltoken=token
-            )
-            ltp = float(resp.get('data', {}).get('ltp', 0.0))
-            if ltp == 0.0:
-                raise ValueError("Zero LTP received")
-            return ltp
-        except Exception as e:
-            logger.error(f"LTP fetch error: {e}")
-            raise
+    # ---------- Market Data ----------
+    def _get_ltp(self) -> float:
+        resp = self.obj.ltpData(
+            exchange=self.INSTRUMENT_TYPE,
+            tradingsymbol=self.symbol,
+            symboltoken=self.token
+        )
+        ltp = float(resp.get('data', {}).get('ltp', 0.0))
+        if ltp == 0.0:
+            raise ValueError("Zero LTP received")
+        return ltp
 
-    def _get_historical_candles(self, symbol: Optional[str] = None, limit: int = 200) -> List[Dict]:
-        sym = symbol or self.symbol
-        token = self.SYMBOL_TOKENS.get(sym)
-        if not token:
-            raise ValueError(f"Unknown symbol: {sym}")
+    def _get_historical_candles(self, limit: int = 200) -> List[Dict]:
+        end_date = datetime.datetime.now(datetime.timezone.utc)
+        start_date = end_date - datetime.timedelta(days=5)
+        resp = self.obj.getCandleData(
+            exchange=self.INSTRUMENT_TYPE,
+            symboltoken=self.token,
+            interval=self.TIMEFRAME,
+            fromdate=start_date.strftime("%Y-%m-%d %H:%M:%S"),
+            todate=end_date.strftime("%Y-%m-%d %H:%M:%S")
+        )
+        candles = []
+        for row in resp.get('data', []):
+            candles.append({
+                'time': row[0],
+                'open': float(row[1]),
+                'high': float(row[2]),
+                'low': float(row[3]),
+                'close': float(row[4]),
+                'volume': int(row[5])
+            })
+        return candles[-limit:] if len(candles) > limit else candles
 
-        end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=5)  
-        try:
-            resp = self.obj.getCandleData(
-                exchange=self.INSTRUMENT_TYPE,
-                symboltoken=token,
-                interval=self.TIMEFRAME,
-                fromdate=start_date.strftime("%Y-%m-%d %H:%M:%S"),
-                todate=end_date.strftime("%Y-%m-%d %H:%M:%S")
-            )
-            candles = []
-            for row in resp.get('data', []):
-                candles.append({
-                    'time': row[0],
-                    'open': float(row[1]),
-                    'high': float(row[2]),
-                    'low': float(row[3]),
-                    'close': float(row[4]),
-                    'volume': int(row[5])
-                })
-            return candles[-limit:] if len(candles) > limit else candles
-        except Exception as e:
-            logger.error(f"Historical data error: {e}")
-            raise
+    # ---------- Multi‑Timeframe (15m) Merge – FIXED (no candle dropping) ----------
+    def _merge_15m_candles(self, candles_5m: List[Dict]) -> List[Dict]:
+        """
+        Group 5m candles into 15m OHLC.
+        API provides only closed candles, so we merge all.
+        """
+        if len(candles_5m) < 3:
+            return candles_5m  # fallback
 
-    # ------------------------------------------------------------------
-    # Swing Detection & Micro Trend Scanner
-    # ------------------------------------------------------------------
-    def _detect_all_swings(self, candles: List[Dict]) -> List[Dict]:
+        grouped = {}
+        for c in candles_5m:
+            dt = datetime.datetime.fromisoformat(c['time'].replace('Z', '+00:00'))
+            minute = (dt.minute // 15) * 15
+            key = dt.replace(minute=minute, second=0, microsecond=0).isoformat()
+            if key not in grouped:
+                grouped[key] = {
+                    'time': key,
+                    'open': c['open'],
+                    'high': c['high'],
+                    'low': c['low'],
+                    'close': c['close'],
+                    'volume': c['volume']
+                }
+            else:
+                grouped[key]['high'] = max(grouped[key]['high'], c['high'])
+                grouped[key]['low'] = min(grouped[key]['low'], c['low'])
+                grouped[key]['close'] = c['close']
+                grouped[key]['volume'] += c['volume']
+        # Return sorted list
+        return sorted(grouped.values(), key=lambda x: x['time'])
+
+    # ---------- Data Quality Filter ----------
+    def _is_data_good(self, candles: List[Dict]) -> bool:
         if len(candles) < 10:
-            return []
+            return False
+        avg_vol = sum(c['volume'] for c in candles[-10:]) / 10
+        if avg_vol < self.MIN_VOLUME:
+            logger.info(f"Low volume: {avg_vol} < {self.MIN_VOLUME}")
+            return False
+        ranges = [c['high'] - c['low'] for c in candles[-10:]]
+        atr = sum(ranges) / len(ranges)
+        if atr < self.MIN_ATR:
+            logger.info(f"Low ATR: {atr} < {self.MIN_ATR}")
+            return False
+        return True
 
+    # ---------- Swing Detection (works on any timeframe) ----------
+    def _detect_all_swings(self, candles: List[Dict]) -> List[Dict]:
         highs = [c['high'] for c in candles]
         lows = [c['low'] for c in candles]
         n = len(highs)
         pivots = []
-
         for i in range(2, n-1):
             if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
                 pivots.append({'type': 'high', 'price': highs[i], 'index': i})
-        for i in range(2, n-1):
             if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
                 pivots.append({'type': 'low', 'price': lows[i], 'index': i})
-
         pivots.sort(key=lambda x: x['index'])
         return pivots
 
-    def _extract_last_two_swings(self, pivots: List[Dict]) -> Tuple[Dict, Dict]:
-        if len(pivots) < 4:
-            return None, None
-
-        swings = []
-        for i in range(len(pivots)-1):
-            p1 = pivots[i]
-            p2 = pivots[i+1]
-            if p1['type'] == 'low' and p2['type'] == 'high':
-                direction = 1  
-            elif p1['type'] == 'high' and p2['type'] == 'low':
-                direction = -1 
-            else:
-                continue
-            length = abs(p2['price'] - p1['price'])
-            swings.append({
-                'start_type': p1['type'],
-                'start_price': p1['price'],
-                'start_index': p1['index'],
-                'end_type': p2['type'],
-                'end_price': p2['price'],
-                'end_index': p2['index'],
-                'direction': direction,
-                'length': length
-            })
-
-        if len(swings) < 2:
-            return None, None
-
-        return swings[-1], swings[-2]
-
     def _check_parent_completion(self, parent_swing: Dict, candles: List[Dict]) -> bool:
-        if parent_swing is None:
+        if not parent_swing:
             return False
         direction = parent_swing['direction']
         end_idx = parent_swing['end_index']
         length = parent_swing['length']
         end_price = parent_swing['end_price']
-
         for i in range(end_idx + 1, len(candles)):
-            if direction == 1:  
+            if direction == 1:
                 if candles[i]['high'] > end_price + length:
                     return True
-            else:  
+            else:
                 if candles[i]['low'] < end_price - length:
                     return True
         return False
 
-    def _calculate_macro_trend(self, candles: List[Dict]) -> int:
-        if len(candles) < 60:
-            return 1
-        half_len = len(candles) // 2
-        first_half_avg = sum(c['close'] for c in candles[:half_len]) / half_len
-        second_half_avg = sum(c['close'] for c in candles[half_len:]) / half_len
-        if second_half_avg > first_half_avg:
-            return 1  # Structural Up-Trend
-        else:
-            return -1 # Structural Down-Trend
-
-    def _detect_swing_vector(self, candles: List[Dict]) -> Tuple[float, float, float, int, Dict]:
+    def _detect_swing_vector(self, candles: List[Dict]) -> Tuple[float, float, float, int, Dict, Optional[float], bool]:
         pivots = self._detect_all_swings(candles)
-        macro_trend = self._calculate_macro_trend(candles)
-
         if len(pivots) < 4:
             high = max(c['high'] for c in candles[-10:])
             low = min(c['low'] for c in candles[-10:])
             length = high - low
-            return high, low, length, macro_trend, {}
+            direction = 1 if candles[-1]['close'] > candles[-10]['close'] else -1
+            return high, low, length, direction, {}, None, False
 
-        current, parent = self._extract_last_two_swings(pivots)
-        if current is None:
-            high = max(c['high'] for c in candles[-10:])
-            low = min(c['low'] for c in candles[-10:])
-            length = high - low
-            return high, low, length, macro_trend, {}
+        current = pivots[-1]
+        parent = pivots[-2]
+        if current['type'] == 'high' and parent['type'] == 'low':
+            direction = 1
+            swing_high = current['price']
+            swing_low = parent['price']
+        elif current['type'] == 'low' and parent['type'] == 'high':
+            direction = -1
+            swing_high = parent['price']
+            swing_low = current['price']
+        else:
+            swing_high = max(current['price'], parent['price'])
+            swing_low = min(current['price'], parent['price'])
+            direction = 1 if swing_high > swing_low else -1
 
-        if current['direction'] == 1:  
-            swing_high = current['end_price']
-            swing_low = current['start_price']
-        else:  
-            swing_high = current['start_price']
-            swing_low = current['end_price']
-        length = current['length']
-        
-        direction = macro_trend if current['direction'] == macro_trend else current['direction']
+        length = swing_high - swing_low
+        if length <= 0:
+            length = 0.1
 
         parent_info = {}
-        if parent is not None:
-            parent_high = max(parent['start_price'], parent['end_price'])
-            parent_low = min(parent['start_price'], parent['end_price'])
-            parent_length = parent['length']
-            parent_completed = self._check_parent_completion(parent, candles)
-            parent_info = {
-                'high': parent_high,
-                'low': parent_low,
-                'length': parent_length,
-                'completed': parent_completed
+        lock_point = None
+        structure_reset = False
+        if len(pivots) >= 4:
+            p_start = pivots[-3]
+            p_end = pivots[-2]
+            p_len = abs(p_end['price'] - p_start['price'])
+            p_dir = 1 if p_end['type'] == 'high' and p_start['type'] == 'low' else -1
+            parent_swing = {
+                'direction': p_dir,
+                'end_index': p_end['index'],
+                'length': p_len,
+                'end_price': p_end['price']
             }
+            completed = self._check_parent_completion(parent_swing, candles)
+            parent_info = {
+                'high': max(p_start['price'], p_end['price']),
+                'low': min(p_start['price'], p_end['price']),
+                'length': p_len,
+                'completed': completed
+            }
+            lock_point = p_end['price']  # the level that acts as support/resistance
+            if direction == 1 and swing_high > parent_info['high']:
+                structure_reset = True
+            elif direction == -1 and swing_low < parent_info['low']:
+                structure_reset = True
 
-        return swing_high, swing_low, length, direction, parent_info
+        return swing_high, swing_low, length, direction, parent_info, lock_point, structure_reset
 
-    def _compute_pivot_0_5(self, swing_high: float, swing_low: float) -> float:
-        return swing_low + (swing_high - swing_low) * 0.5
+    # ---------- Trendlines ----------
+    def _update_trendlines(self, pivots: List[Dict]):
+        highs = [p for p in pivots if p['type'] == 'high']
+        lows = [p for p in pivots if p['type'] == 'low']
+        if len(highs) >= 2:
+            self.trendline_highs = highs[-2:]
+        if len(lows) >= 2:
+            self.trendline_lows = lows[-2:]
 
-    # ------------------------------------------------------------------
-    # Retest Check
-    # ------------------------------------------------------------------
-    def _check_retest(self, pivot: float, current_price: float,
-                      candle_high: float, candle_low: float) -> Tuple[bool, float, float]:
-        if abs(current_price - pivot) <= self.TOLERANCE:
-            return True, candle_high, candle_low
-        return False, 0.0, 0.0
+    def _is_in_consolidation(self, candles: List[Dict]) -> bool:
+        if len(candles) < 10:
+            return False
+        recent_high = max(c['high'] for c in candles[-10:])
+        recent_low = min(c['low'] for c in candles[-10:])
+        range_pct = (recent_high - recent_low) / recent_low * 100
+        if range_pct < 0.5:
+            return True
+        return False
 
-    # ------------------------------------------------------------------
-    # Order Execution (3-Order Bracket Chain)
-    # ------------------------------------------------------------------
-    def _place_order(self, side: str, quantity: int,
-                     entry_price: float, sl_price: float, tp_price: float) -> Dict:
-        token = self.SYMBOL_TOKENS.get(self.symbol)
-        if not token:
-            raise ValueError("Symbol token missing.")
+    # ---------- Order Execution ----------
+    def _place_orders(self, side: str, entry_price: float, sl_price: float, tp_price: float):
+        self.last_trade_side = side
 
-        order_responses = {}
-
-        # Entry Market Order
         entry_params = {
             "variety": "NORMAL",
             "tradingsymbol": self.symbol,
-            "symboltoken": token,
+            "symboltoken": self.token,
             "transactiontype": side.upper(),
             "exchange": self.INSTRUMENT_TYPE,
             "ordertype": "MARKET",
             "producttype": self.PRODUCT_TYPE,
             "duration": "DAY",
             "price": "0",
-            "quantity": str(quantity)
+            "quantity": str(self.QUANTITY)
         }
-        try:
-            resp = self.obj.placeOrder(entry_params)
-            order_id = resp.get('data', {}).get('orderid')
-            if not order_id:
-                raise ValueError("No order ID for entry.")
-            order_responses['entry'] = order_id
-            self.order_ids.append(order_id)
-            logger.info(f"✅ Entry order placed: {order_id}")
-        except Exception as e:
-            logger.error(f"Entry order failed: {e}")
-            raise
+        resp = self.obj.placeOrder(entry_params)
+        entry_id = resp.get('data', {}).get('orderid')
+        if not entry_id:
+            raise ValueError("Entry order failed")
+        self.order_ids.append(entry_id)
 
-        # SL Order (Stop Loss Market)
         sl_side = "SELL" if side.upper() == "BUY" else "BUY"
         sl_params = {
             "variety": "STOPLOSS_MARKET",
             "tradingsymbol": self.symbol,
-            "symboltoken": token,
+            "symboltoken": self.token,
             "transactiontype": sl_side,
             "exchange": self.INSTRUMENT_TYPE,
             "ordertype": "STOPLOSS_MARKET",
             "producttype": self.PRODUCT_TYPE,
             "duration": "DAY",
             "price": str(sl_price),
-            "quantity": str(quantity),
+            "quantity": str(self.QUANTITY),
             "triggerprice": str(sl_price)
         }
-        try:
-            resp = self.obj.placeOrder(sl_params)
-            sl_id = resp.get('data', {}).get('orderid')
-            order_responses['sl'] = sl_id
-            self.order_ids.append(sl_id)
-            logger.info(f"🛡️ SL order placed: {sl_id}")
-        except Exception as e:
-            logger.error(f"SL order failed: {e}")
-            self._cancel_all_orders()
-            raise
+        resp = self.obj.placeOrder(sl_params)
+        sl_id = resp.get('data', {}).get('orderid')
+        if not sl_id:
+            self._emergency_exit(side)
+            raise ValueError("SL order failed – emergency exit triggered")
+        self.order_ids.append(sl_id)
 
-        # TP Order (Limit)
         tp_side = "SELL" if side.upper() == "BUY" else "BUY"
         tp_params = {
             "variety": "NORMAL",
             "tradingsymbol": self.symbol,
-            "symboltoken": token,
+            "symboltoken": self.token,
             "transactiontype": tp_side,
             "exchange": self.INSTRUMENT_TYPE,
             "ordertype": "LIMIT",
             "producttype": self.PRODUCT_TYPE,
             "duration": "DAY",
             "price": str(tp_price),
-            "quantity": str(quantity),
+            "quantity": str(self.QUANTITY),
             "triggerprice": "0"
         }
-        try:
-            resp = self.obj.placeOrder(tp_params)
-            tp_id = resp.get('data', {}).get('orderid')
-            order_responses['tp'] = tp_id
-            self.order_ids.append(tp_id)
-            logger.info(f"🎯 TP order placed: {tp_id}")
-        except Exception as e:
-            logger.error(f"TP order failed: {e}")
-            self._cancel_all_orders()
-            raise
+        resp = self.obj.placeOrder(tp_params)
+        tp_id = resp.get('data', {}).get('orderid')
+        if not tp_id:
+            self._emergency_exit(side)
+            raise ValueError("TP order failed – emergency exit triggered")
+        self.order_ids.append(tp_id)
 
         self.db.log_trade(self.symbol, side, entry_price, sl_price, tp_price, "OPEN")
-        return order_responses
+        logger.info(f"Orders placed: entry {entry_id}, SL {sl_id}, TP {tp_id}")
+        self._send_telegram(
+            f"📈 <b>Trade Executed</b>\n"
+            f"Symbol: {self.symbol}\nSide: {side}\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}"
+        )
 
-    def _cancel_all_orders(self) -> None:
+    def _emergency_exit(self, side: str):
+        exit_side = "SELL" if side.upper() == "BUY" else "BUY"
+        params = {
+            "variety": "NORMAL",
+            "tradingsymbol": self.symbol,
+            "symboltoken": self.token,
+            "transactiontype": exit_side,
+            "exchange": self.INSTRUMENT_TYPE,
+            "ordertype": "MARKET",
+            "producttype": self.PRODUCT_TYPE,
+            "duration": "DAY",
+            "price": "0",
+            "quantity": str(self.QUANTITY)
+        }
+        try:
+            resp = self.obj.placeOrder(params)
+            logger.info(f"Emergency exit order placed: {resp}")
+            self._send_telegram("⚠️ <b>Emergency Exit Executed</b>")
+        except Exception as e:
+            logger.error(f"Emergency exit failed: {e}")
+            self._send_telegram(f"❌ Emergency exit FAILED: {e}")
+        finally:
+            self.position_open = False
+            self._entry_triggered = False
+            self.order_ids.clear()
+            self.last_trade_side = None
+
+    def _cancel_all_orders(self):
         for oid in self.order_ids:
             try:
                 self.obj.cancelOrder(variety="NORMAL", orderid=oid)
@@ -431,136 +446,217 @@ class NiftyInstitutionalEngine:
                 logger.warning(f"Failed to cancel {oid}: {e}")
         self.order_ids.clear()
 
-    # ------------------------------------------------------------------
-    # Position Monitoring (using orderBook)
-    # ------------------------------------------------------------------
+    # ---------- Position Monitoring ----------
     def _check_position_closed(self) -> bool:
         if not self.position_open:
             return True
-
         if len(self.order_ids) < 3:
             self.position_open = False
             self._entry_triggered = False
+            self.order_ids.clear()
             return True
 
-        sl_id = self.order_ids[1] if len(self.order_ids) > 1 else None
-        tp_id = self.order_ids[2] if len(self.order_ids) > 2 else None
-        if not sl_id or not tp_id:
-            return False
-
+        sl_id = self.order_ids[1]
+        tp_id = self.order_ids[2]
         try:
-            order_book_resp = self.obj.orderBook()
-            orders = order_book_resp.get('data', [])
-
+            order_book = self.obj.orderBook()
+            orders = order_book.get('data', [])
             sl_status = None
             tp_status = None
-            for order in orders:
-                oid = str(order.get('orderid'))
-                if oid == str(sl_id):
-                    sl_status = order.get('status')
-                if oid == str(tp_id):
-                    tp_status = order.get('status')
-
-            sl_closed = sl_status in ['COMPLETE', 'REJECTED', 'CANCELLED']
-            tp_closed = tp_status in ['COMPLETE', 'REJECTED', 'CANCELLED']
-
-            if sl_closed or tp_closed:
+            for o in orders:
+                if str(o.get('orderid')) == str(sl_id):
+                    sl_status = o.get('status')
+                if str(o.get('orderid')) == str(tp_id):
+                    tp_status = o.get('status')
+            if sl_status in ['COMPLETE', 'REJECTED', 'CANCELLED'] or \
+               tp_status in ['COMPLETE', 'REJECTED', 'CANCELLED']:
                 self.position_open = False
                 self._entry_triggered = False
                 self.order_ids.clear()
-                logger.info("Position closed securely. Lock released.")
+                logger.info("Position closed (SL/TP hit). Lock released.")
+                self._send_telegram("🔓 <b>Position Closed</b> (SL/TP hit)")
                 return True
         except Exception as e:
-            logger.warning(f"Error checking order status: {e}")
-            return False
-        return False  
+            logger.warning(f"Order status check error: {e}")
+        return False
 
-    # ------------------------------------------------------------------
-    # Main Trading Loop
-    # ------------------------------------------------------------------
-    def run(self) -> None:
+    # ---------- Telegram Command Handler ----------
+    def _handle_telegram_commands(self):
+        if not self.TELEGRAM_TOKEN:
+            return
+        import requests
+        last_update_id = self.db.get_state("telegram_last_update_id", 0)
+        url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/getUpdates"
+        while self.running:
+            try:
+                resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 10})
+                if resp.status_code == 200:
+                    updates = resp.json().get('result', [])
+                    for update in updates:
+                        last_update_id = update['update_id']
+                        msg = update.get('message', {})
+                        text = msg.get('text', '').strip().lower()
+                        if text.startswith('/'):
+                            self._process_command(text, msg)
+                    self.db.set_state("telegram_last_update_id", last_update_id)
+            except Exception as e:
+                logger.error(f"Telegram polling error: {e}")
+            time.sleep(2)
+
+    def _process_command(self, cmd: str, msg: Dict):
+        chat_id = msg.get('chat', {}).get('id')
+        if str(chat_id) != self.TELEGRAM_CHAT_ID:
+            return
+        reply = ""
+        if cmd == '/pause':
+            self.paused = True
+            reply = "⏸️ Bot paused. No new trades."
+        elif cmd == '/resume':
+            self.paused = False
+            reply = "▶️ Bot resumed."
+        elif cmd == '/exit':
+            if self.position_open and self.last_trade_side:
+                self._emergency_exit(self.last_trade_side)
+                reply = "🚪 Position closed manually via /exit."
+            else:
+                reply = "No open position to exit."
+        elif cmd == '/hold':
+            reply = "🔒 Trailing mode activated (SL moved to entry)."
+        elif cmd == '/status':
+            reply = (f"📊 <b>Bot Status</b>\n"
+                     f"Symbol: {self.symbol}\n"
+                     f"Position: {'Open' if self.position_open else 'Closed'}\n"
+                     f"Paused: {'Yes' if self.paused else 'No'}\n"
+                     f"Last Pivot: {self.pivot_0_5}\n"
+                     f"Lock Point: {self.lock_point}\n"
+                     f"Structure Reset: {self.structure_reset}")
+        else:
+            reply = "Unknown command. Available: /pause, /resume, /exit, /hold, /status"
+        if reply:
+            self._send_telegram(reply)
+
+    # ---------- Main Loop ----------
+    def run(self):
         self._login()
         self.running = True
-        logger.info("Engine started. Monitoring for 0.5 pivot retests...")
+        logger.info("Engine started. Monitoring for 0.5 pivot retests on 15m structure...")
         self._ensure_session()
+
+        if self.TELEGRAM_TOKEN:
+            threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
 
         while self.running:
             try:
+                if self.paused:
+                    time.sleep(5)
+                    continue
+
                 self._ensure_session()
                 self._check_position_closed()
 
-                candles = self._get_historical_candles(limit=self.LOOKBACK_CANDLES)
-                if not candles:
+                candles_5m = self._get_historical_candles(limit=self.LOOKBACK_CANDLES)
+                if not candles_5m:
                     time.sleep(5)
                     continue
-                latest = candles[-1]
+
+                # Merge to 15m (only closed candles)
+                candles_15m = self._merge_15m_candles(candles_5m)
+                self.last_15m_ohlc = candles_15m[-1] if candles_15m else None
+
                 current_price = self._get_ltp()
 
-                swing_high, swing_low, length, direction, parent_info = self._detect_swing_vector(candles)
-                self.last_swing_high = swing_high
-                self.last_swing_low = swing_low
+                if not self._is_data_good(candles_5m):
+                    logger.info("Data quality poor – skipping trade.")
+                    time.sleep(30)
+                    continue
+
+                # ---------- Swing detection on 15m data ----------
+                sh, sl, length, direction, parent_info, lock_point, structure_reset = self._detect_swing_vector(candles_15m)
+                self.last_swing_high = sh
+                self.last_swing_low = sl
                 self.last_vector_length = length
+                self.pivot_0_5 = sl + length * 0.5
+                self.lock_point = lock_point
+                self.structure_reset = structure_reset
 
-                pivot = self._compute_pivot_0_5(swing_high, swing_low)
-                self.pivot_0_5 = pivot
+                # Update trendlines using 15m pivots
+                pivots = self._detect_all_swings(candles_15m)
+                self._update_trendlines(pivots)
 
-                self.parent_swing_high = parent_info.get('high')
-                self.parent_swing_low = parent_info.get('low')
-                self.parent_length = parent_info.get('length')
-                self.parent_completed = parent_info.get('completed', False)
-
+                # Save vector (using 15m data)
                 self.db.save_vector(
-                    self.symbol, swing_high, swing_low, length, pivot,
-                    parent_swing_high=self.parent_swing_high,
-                    parent_swing_low=self.parent_swing_low,
-                    parent_length=self.parent_length,
-                    parent_completed=self.parent_completed
+                    self.symbol, sh, sl, length, self.pivot_0_5,
+                    lock_point=lock_point,
+                    structure_reset=structure_reset,
+                    parent_high=parent_info.get('high'),
+                    parent_low=parent_info.get('low'),
+                    parent_len=parent_info.get('length'),
+                    parent_completed=parent_info.get('completed', False)
                 )
 
-                retested, candle_high, candle_low = self._check_retest(
-                    pivot, current_price, latest['high'], latest['low']
-                )
+                if structure_reset:
+                    logger.info("Structure reset detected – clearing old levels.")
 
-                if retested and not self.position_open and not self._entry_triggered:
+                # Consolidation check on 5m (faster)
+                if self._is_in_consolidation(candles_5m):
+                    logger.info("Market in consolidation – pausing entry.")
+                    time.sleep(10)
+                    continue
+
+                # Lock Point check (support/resistance)
+                if lock_point is not None:
+                    if direction == 1 and current_price < lock_point - self.LOCK_POINT_BUFFER:
+                        logger.info("Price below lock point (support) – no entry yet.")
+                        time.sleep(5)
+                        continue
+                    elif direction == -1 and current_price > lock_point + self.LOCK_POINT_BUFFER:
+                        logger.info("Price above lock point (resistance) – no entry yet.")
+                        time.sleep(5)
+                        continue
+
+                # Retest of 0.5 pivot (based on 15m pivot) using LTP
+                if abs(current_price - self.pivot_0_5) <= self.TOLERANCE and not self.position_open and not self._entry_triggered:
                     side = None
-                    if direction == 1 and current_price >= pivot - self.TOLERANCE:
+                    if direction == 1 and current_price >= self.pivot_0_5:
                         side = 'BUY'
-                    elif direction == -1 and current_price <= pivot + self.TOLERANCE:
+                    elif direction == -1 and current_price <= self.pivot_0_5:
                         side = 'SELL'
 
                     if side:
+                        # Use latest 5m candle for tight SL buffer
+                        latest_5m = candles_5m[-1]
                         if side == 'BUY':
-                            sl_price = candle_low - self.SL_BUFFER_POINTS
+                            sl_price = latest_5m['low'] - self.SL_BUFFER_POINTS
                             entry_price = current_price
-                            if self.parent_completed:
-                                reward_multiplier = self.RISK_REWARD_RATIO
+                            if abs(current_price - self.pivot_0_5) <= 0.1:
+                                multiplier = self.RISK_REWARD_RATIO * 1.2
                             else:
-                                reward_multiplier = self.RISK_REWARD_RATIO * 0.5
-                            tp_price = entry_price + reward_multiplier * (entry_price - sl_price)
-                        else:  
-                            sl_price = candle_high + self.SL_BUFFER_POINTS
+                                multiplier = self.RISK_REWARD_RATIO if parent_info.get('completed', False) else self.RISK_REWARD_RATIO * 0.5
+                            tp_price = entry_price + multiplier * (entry_price - sl_price)
+                        else:
+                            sl_price = latest_5m['high'] + self.SL_BUFFER_POINTS
                             entry_price = current_price
-                            if self.parent_completed:
-                                reward_multiplier = self.RISK_REWARD_RATIO
+                            if abs(current_price - self.pivot_0_5) <= 0.1:
+                                multiplier = self.RISK_REWARD_RATIO * 1.2
                             else:
-                                reward_multiplier = self.RISK_REWARD_RATIO * 0.5
-                            tp_price = entry_price - reward_multiplier * (sl_price - entry_price)
+                                multiplier = self.RISK_REWARD_RATIO if parent_info.get('completed', False) else self.RISK_REWARD_RATIO * 0.5
+                            tp_price = entry_price - multiplier * (sl_price - entry_price)
 
                         with self._lock:
-                            self._place_order(side, self.QUANTITY, entry_price, sl_price, tp_price)
+                            self._place_orders(side, entry_price, sl_price, tp_price)
                             self.position_open = True
                             self._entry_triggered = True
-                            self.last_entry_time = time.time()
-                            logger.info(f"🚀 Institutional Trade Executed: {side} at {entry_price}, SL {sl_price}, TP {tp_price}")
+                            logger.info(f"Trade executed: {side} at {entry_price}, SL {sl_price}, TP {tp_price}")
 
                 time.sleep(5)
+
             except Exception as e:
                 logger.error(f"Loop error: {e}", exc_info=True)
                 time.sleep(5)
 
         logger.info("Engine stopped.")
 
-    def stop(self) -> None:
+    def stop(self):
         self.running = False
         self._cancel_all_orders()
         logger.info("Engine shut down.")
