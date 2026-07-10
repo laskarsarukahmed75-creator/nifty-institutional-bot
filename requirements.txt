@@ -3,4 +3,4 @@ Flask>=3.0.0
 requests>=2.31.0
 gunicorn>=21.2.0
 pyotp>=2.9.0
-python-telegram-bot>=20.0   # for Telegram remote control (or we can use requests)
+python-telegram-bot>=20.0
