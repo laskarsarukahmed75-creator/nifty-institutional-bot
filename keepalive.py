@@ -1,70 +1,91 @@
 # keepalive.py
 import os
-import sys
 import threading
 import time
 import logging
-import requests
+import datetime
 from flask import Flask, jsonify
+import requests
+from app import NiftyInstitutionalEngine
 
-# डेटा मैनेजर, टेलीग्राम कंट्रोल और मुख्य इंजन इम्पोर्ट
-from data_manager import DataManager
-from telegram_control import TelegramControl
-
-try:
-    from app import NiftyInstitutionalEngine
-except ImportError as e:
-    logging.critical(f"Engine import failed: {e}")
-    sys.exit(1)
+# ---------- Logging Setup ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("KeepAliveServer")
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("KeepAlive")
-
-# इंजन को बूट होते ही सबसे पहले मेन रैम में ऑन कर देते हैं ताकि कोई साइलेंट फ्रीज न हो!
-logger.info("🔥 Main Execution: Initializing NiftyInstitutionalEngine...")
-try:
-    engine = NiftyInstitutionalEngine()
-    data_mgr = DataManager()
-    telegram_ctrl = TelegramControl(engine)
-    
-    # 4 महीने का डेटा फेच बैकग्राउंड में फेंकेंगे ताकि रेंडर का पोर्ट जाम न हो
-    threading.Thread(target=lambda: data_mgr.fetch_and_store(engine.obj), daemon=True).start()
-    
-    # मुख्य इंजन का लूप बैकग्राउंड थ्रेड में सुरक्षित ऑन करें
-    threading.Thread(target=engine.run, daemon=True).start()
-    logger.info("🚀 System Active: Core Engine Loop triggered.")
-except Exception as startup_err:
-    logger.error(f"❌ DIRECT ENGINE INIT FAILED: {startup_err}")
+engine = None
 
 @app.route("/")
 def health_check():
-    # अब यह सीधे चेक करेगा, कोई धोखा नहीं
-    status = "running" if engine and getattr(engine, "running", False) else "stopped"
+    """Render Web Service handles health check and returns engine status."""
+    status = "running" if engine and engine.running else "stopped"
+    is_paused = "paused" if engine and engine.paused else "active"
+    
     return jsonify({
-        "status": "active" if status == "running" else "inactive",
+        "status": "operational" if status == "running" else "inactive",
+        "message": "SBNiftybot Institutional Engine (15m Structure) is live",
         "engine_status": status,
-        "position_open": engine.position_open if engine else False,
-        "pivot": engine.pivot_0_5 if engine else None,
-        "data_manager": "active" if data_mgr else "inactive",
-        "telegram_control": "active" if telegram_ctrl else "inactive"
+        "operation_mode": is_paused,
+        "current_time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()
     })
 
-def self_ping():
-    """रेंडर को एक्टिव रखने के लिए हर 60 सेकंड का पिंग लूप"""
-    port = os.environ.get("PORT", 8080)
-    base_url = f"http://0.0.0.0:{port}"
+@app.route("/stop")
+def stop_engine():
+    """Emergency route to manually stop the bot via browser/HTTP request."""
+    global engine
+    if engine:
+        engine.stop()
+        return jsonify({"status": "stopped", "message": "Engine shut down successfully."})
+    return jsonify({"status": "error", "message": "Engine was not running."})
+
+def start_engine_thread():
+    """Target function to boot the algorithmic engine in a separate daemon thread."""
+    global engine
+    logger.info("Waiting 5 seconds for system warm-up before initializing engine...")
+    time.sleep(5)
+    try:
+        engine = NiftyInstitutionalEngine()
+        engine.run()
+    except Exception as e:
+        logger.error(f"Algorithmic Core crashed unexpectedly: {e}", exc_info=True)
+
+def self_ping_loop():
+    """Anti-Sleep Loop: Keeps Render's free/hobby tier instances from sleeping."""
+    port = os.environ.get('PORT', '8080')
+    base_url = f"http://127.0.0.1:{port}"
+    
+    # Wait for Flask to boot completely
+    time.sleep(15)
+    logger.info(f"Self-ping cycle initiated against local fallback target: {base_url}")
+    
     while True:
-        time.sleep(60)
         try:
-            requests.get(base_url, timeout=10)
-        except Exception:
-            pass
+            # Pings every 10 minutes (600 seconds)
+            response = requests.get(base_url, timeout=10)
+            if response.status_code == 200:
+                logger.info("Anti-sleep self-ping: SUCCESS (Instance is awake)")
+            else:
+                logger.warning(f"Anti-sleep self-ping returned unexpected status: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Self-ping execution bottleneck encountered: {e}")
+        
+        time.sleep(600)
 
 if __name__ == "__main__":
-    # पिंगर को एक्टिव करें
-    threading.Thread(target=self_ping, daemon=True).start()
-
-    # फ्लास्क सर्वर तुरंत रेंडर के पोर्ट को थाम लेगा
+    # 1. Start the main algorithmic trading engine in background
+    trading_thread = threading.Thread(target=start_engine_thread, daemon=True)
+    trading_thread.start()
+    
+    # 2. Start the anti-sleep manager to monitor local loopback
+    ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
+    ping_thread.start()
+    
+    # 3. Initialize Gunicorn-compatible Flask web portal
     port = int(os.environ.get("PORT", 8080))
+    logger.info(f"Launching production Flask listener on port {port}...")
+    
+    # Running inside production container context
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
