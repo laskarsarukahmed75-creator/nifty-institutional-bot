@@ -58,7 +58,7 @@ class NiftyInstitutionalEngine:
     SL_BUFFER_POINTS = 4.0          
     RISK_REWARD_RATIO = 10.0        
     TOLERANCE = 0.5                 
-    QUANTITY = int(os.environ.get("TRADE_QUANTITY", 65)) # 100% matched with your live Groww Lot Size (65)
+    QUANTITY = int(os.environ.get("TRADE_QUANTITY", 65))
 
     # Symbol token mapping
     SYMBOL_TOKENS = {
@@ -196,7 +196,7 @@ class NiftyInstitutionalEngine:
             raise
 
     # ------------------------------------------------------------------
-    # Swing Detection & Micro Trend Scanner (The Ultimate Fix)
+    # Swing Detection & Micro Trend Scanner
     # ------------------------------------------------------------------
     def _detect_all_swings(self, candles: List[Dict]) -> List[Dict]:
         if len(candles) < 10:
@@ -266,22 +266,15 @@ class NiftyInstitutionalEngine:
         return False
 
     def _calculate_macro_trend(self, candles: List[Dict]) -> int:
-        """
-        Deep Historical Audit: Checks the real mathematical macro trend over 150 candles
-        to ensure the bot NEVER gets trapped by minor fake pullbacks.
-        Returns 1 for Up-Trend, -1 for Down-Trend.
-        """
         if len(candles) < 60:
             return 1
-        
         half_len = len(candles) // 2
         first_half_avg = sum(c['close'] for c in candles[:half_len]) / half_len
         second_half_avg = sum(c['close'] for c in candles[half_len:]) / half_len
-        
         if second_half_avg > first_half_avg:
-            return 1  # Structural Up-Trend confirmed
+            return 1  # Structural Up-Trend
         else:
-            return -1 # Structural Down-Trend confirmed
+            return -1 # Structural Down-Trend
 
     def _detect_swing_vector(self, candles: List[Dict]) -> Tuple[float, float, float, int, Dict]:
         pivots = self._detect_all_swings(candles)
@@ -308,7 +301,6 @@ class NiftyInstitutionalEngine:
             swing_low = current['end_price']
         length = current['length']
         
-        # COMBINED PROTECTION: Minor swing must align with historical Macro Trend!
         direction = macro_trend if current['direction'] == macro_trend else current['direction']
 
         parent_info = {}
