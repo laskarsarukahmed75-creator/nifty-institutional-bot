@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: nifty-institutional-bot
+    runtime: python
+    buildCommand: python -m pip install --upgrade pip && python -m pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn keepalive:app
+    envVars:
+      - key: ANGEL_API_KEY
+        sync: false
+      - key: ANGEL_CLIENT_ID
+        sync: false
+      - key: ANGEL_PASSWORD
+        sync: false
+      - key: ANGEL_TOTP_SECRET
+        sync: false
+      - key: TRADE_SYMBOL
+        value: NIFTY
+      - key: TRADE_QUANTITY
+        value: 65
