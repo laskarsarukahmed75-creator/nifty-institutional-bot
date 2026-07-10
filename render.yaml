@@ -1,10 +1,12 @@
 services:
   - type: web
     name: nifty-institutional-bot
-    runtime: python
+    env: python
     buildCommand: python -m pip install --upgrade pip && python -m pip install --no-cache-dir -r requirements.txt
     startCommand: gunicorn keepalive:app
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.11
       - key: ANGEL_API_KEY
         sync: false
       - key: ANGEL_CLIENT_ID
@@ -12,6 +14,10 @@ services:
       - key: ANGEL_PASSWORD
         sync: false
       - key: ANGEL_TOTP_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
         sync: false
       - key: TRADE_SYMBOL
         value: NIFTY
