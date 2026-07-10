@@ -12,6 +12,7 @@ import importlib
 import traceback
 import threading
 import time
+import requests  # Added for completeness (prepares for future use)
 from typing import List, Dict, Any, Optional
 
 # ---- Configuration ----
@@ -22,8 +23,11 @@ REQUIRED_ENV_VARS = [
     "ANGEL_TOTP_SECRET"
 ]
 
+# FIX #1: Include alternative names for SmartAPI
 REQUIRED_IMPORTS = [
-    "SmartApi",
+    ("SmartApi", "smartapi-python"),
+    ("smartapi", "smartapi-python"),  # fallback name
+    ("SmartConnect", "smartapi-python"),  # fallback name
     "requests",
     "flask",
     "gunicorn",
@@ -71,7 +75,10 @@ def check_environment_variables() -> tuple:
     return "OK", "All required environment variables are set.", ""
 
 def check_requirements() -> tuple:
-    """Check if requirements.txt packages are installed."""
+    """
+    Check if requirements.txt packages are installed.
+    FIX #2: Uses import check instead of unreliable distribution metadata.
+    """
     if not os.path.exists(REQUIREMENTS_FILE):
         return "FAIL", "requirements.txt not found.", "Create requirements.txt with required packages."
     issues = []
@@ -79,41 +86,64 @@ def check_requirements() -> tuple:
     try:
         with open(REQUIREMENTS_FILE, "r") as f:
             required = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-        # Use importlib.metadata if available, else pkg_resources
-        try:
-            from importlib.metadata import distribution, PackageNotFoundError
-        except ImportError:
-            from pkg_resources import get_distribution, DistributionNotFound as PackageNotFoundError
-            distribution = get_distribution
+        # For each requirement, try to import the expected module.
         for req in required:
-            try:
-                pkg_name = req.split("==")[0] if "==" in req else req.split(">=")[0] if ">=" in req else req
-                dist = distribution(pkg_name)
-            except PackageNotFoundError:
-                issues.append(f"Package not installed: {req}")
-                fixes.append(f"Run: pip install {req}")
+            pkg_name = req.split("==")[0] if "==" in req else req.split(">=")[0] if ">=" in req else req
+            # Map known package names to import names
+            import_name = pkg_name
+            if pkg_name == "smartapi-python":
+                # Try multiple possible import names
+                possible_imports = ["SmartApi", "smartapi", "SmartConnect"]
+                found = False
+                for imp in possible_imports:
+                    try:
+                        importlib.import_module(imp)
+                        found = True
+                        break
+                    except ImportError:
+                        continue
+                if not found:
+                    issues.append(f"Package {pkg_name} not importable (tried {', '.join(possible_imports)}).")
+                    fixes.append(f"Install {pkg_name}: pip install {pkg_name}")
+            else:
+                # Standard package: import directly
+                try:
+                    importlib.import_module(pkg_name)
+                except ImportError:
+                    issues.append(f"Package not importable: {pkg_name} (from {req})")
+                    fixes.append(f"Install {pkg_name}: pip install {pkg_name}")
     except Exception as e:
         issues.append(f"Error reading requirements.txt: {e}")
         fixes.append("Check file permissions and syntax.")
     if issues:
         return "FAIL", "\n".join(issues), "\n".join(fixes)
-    return "OK", "All packages installed.", ""
+    return "OK", "All required packages are importable.", ""
 
 def check_imports() -> tuple:
-    """Try to import required modules and capture full traceback."""
+    """
+    Try to import required modules and capture full traceback.
+    FIX #1: SmartAPI is now checked via multiple names in check_requirements,
+    but we also keep an explicit check for clarity.
+    """
     results = []
     fixes = []
-    for mod_name in REQUIRED_IMPORTS:
+    # We'll check a set of known import names
+    for entry in REQUIRED_IMPORTS:
+        if isinstance(entry, tuple):
+            mod_name, pkg_name = entry
+        else:
+            mod_name = entry
+            pkg_name = entry
         try:
             importlib.import_module(mod_name)
             results.append(f"✅ {mod_name}")
         except Exception as e:
             tb = traceback.format_exc()
             results.append(f"❌ {mod_name}: {e}")
-            if "SmartApi" in mod_name:
+            if "Smart" in mod_name:
                 fixes.append("Install smartapi-python: pip install smartapi-python==1.5.5")
             else:
-                fixes.append(f"Install missing package: {mod_name}")
+                fixes.append(f"Install missing package: {pkg_name}")
     if any("❌" in r for r in results):
         return "FAIL", "\n".join(results), "\n".join(fixes)
     return "OK", "\n".join(results), ""
@@ -175,7 +205,6 @@ def run_engine_instantiation_with_timeout() -> tuple:
         result["status"] = "TIMEOUT"
         result["details"] = f"Engine instantiation timed out after {ENGINE_INIT_TIMEOUT} seconds."
         result["fix"] = "Check if any external API call is hanging (e.g., login). Ensure network connectivity and credentials are valid."
-        # Optionally, we could try to kill the thread, but that's unsafe; we just report.
     return result["status"], result["details"], result["fix"]
 
 
