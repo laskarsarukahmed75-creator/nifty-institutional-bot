@@ -6,29 +6,29 @@ import threading
 import datetime
 from typing import Optional, Dict, List, Tuple, Union, Any
 
-# ---------- Ultimate SmartConnect Import Fix for Render Python 3.12 ----------
+# ---------- Ultimate SmartConnect Case-Insensitive Import Fix ----------
 try:
-    from smartapi import SmartConnect
-    from smartapi.smartConnect import SmartConnectException
-except (ImportError, ModuleNotFoundError):
+    # रास्ता 1: डीपसीक का बताया हुआ नया Capitalized Capital S & A रास्ता
+    from SmartApi import SmartConnect
     try:
-        from SmartConnect import SmartConnect
-        SmartConnectException = Exception
-    except (ImportError, ModuleNotFoundError):
+        from SmartApi.smartConnect import SmartConnectException
+    except ImportError:
+        from SmartApi import SmartConnectException
+except ImportError:
+    try:
+        # रास्ता 2: पुराना स्टैंडर्ड छोटा अक्षरों वाला रास्ता
+        from smartapi import SmartConnect
         try:
-            import smartapi
-            SmartConnect = smartapi.SmartConnect
+            from smartapi.smartConnect import SmartConnectException
+        except ImportError:
+            from smartapi import SmartConnectException
+    except ImportError:
+        # रास्ता 3: रेंडर का स्पेशल डायरेक्ट मॉड्यूल रूट
+        try:
+            from SmartConnect import SmartConnect
             SmartConnectException = Exception
-        except (ImportError, ModuleNotFoundError):
-            import sys
-            if 'smartapi' not in sys.modules:
-                try:
-                    import SmartConnect as sc
-                    sys.modules['smartapi'] = sc
-                    SmartConnect = sc.SmartConnect
-                except ImportError:
-                    raise ImportError("Angel One SmartAPI package missing from Render environment.")
-            SmartConnectException = Exception
+        except ImportError:
+            raise ImportError("Angel One SmartAPI package missing from Render. Check requirements.txt")
 
 # Local modules
 from db_handler import DBHandler
