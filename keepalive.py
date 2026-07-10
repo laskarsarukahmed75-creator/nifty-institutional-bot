@@ -1,13 +1,13 @@
 # keepalive.py
 import os
 import sys
-import subprocess
 import threading
 import time
 import logging
+import requests
 from flask import Flask, jsonify
 
-# ---------- STEP 1: Validate required environment variables ----------
+# ---------- Validate required environment variables ----------
 REQUIRED_ENV_VARS = [
     "ANGEL_API_KEY",
     "ANGEL_CLIENT_ID",
@@ -18,38 +18,14 @@ missing = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
 if missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-# ---------- STEP 2: Emergency import fallback (runtime install) ----------
-def _ensure_smartapi():
-    """Try to import smartapi; if missing, install it once at runtime."""
-    try:
-        import smartapi
-        from smartapi import SmartConnect
-        return True
-    except ImportError:
-        logging.warning("smartapi not found at runtime – attempting emergency install...")
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "smartapi-python==1.5.5"]
-            )
-            import smartapi
-            from smartapi import SmartConnect
-            logging.info("Emergency install succeeded.")
-            return True
-        except Exception as e:
-            logging.error(f"Emergency install failed: {e}")
-            raise ImportError("Cannot proceed without smartapi package.") from e
-
-# Now try to import your engine – if it fails due to smartapi, run the fallback
+# ---------- Import engine ----------
 try:
     from app import NiftyInstitutionalEngine
 except ImportError as e:
-    if "smartapi" in str(e).lower():
-        _ensure_smartapi()
-        from app import NiftyInstitutionalEngine
-    else:
-        raise
+    logging.error(f"Failed to import engine: {e}")
+    raise
 
-# ---------- STEP 3: Flask app and engine thread ----------
+# ---------- Flask app and engine thread ----------
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("KeepAlive")
