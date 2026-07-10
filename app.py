@@ -4,34 +4,35 @@ import time
 import logging
 import threading
 import datetime
+import sys
 from typing import Optional, Dict, List, Tuple, Union, Any
 
-# ---------- Ultimate SmartConnect Case-Insensitive Import Fix ----------
+# ---------- 🛡️ एंजेल वन बुलेटप्रूफ इम्पोर्ट राउटर ----------
+SmartConnectException = Exception # पहले से ही एक सुरक्षित फलबैक बना दिया
+
 try:
-    # रास्ता 1: डीपसीक का बताया हुआ नया Capitalized Capital S & A रास्ता
     from SmartApi import SmartConnect
     try:
         from SmartApi.smartConnect import SmartConnectException
-    except ImportError:
-        from SmartApi import SmartConnectException
+    except Exception:
+        pass
 except ImportError:
     try:
-        # रास्ता 2: पुराना स्टैंडर्ड छोटा अक्षरों वाला रास्ता
         from smartapi import SmartConnect
         try:
             from smartapi.smartConnect import SmartConnectException
-        except ImportError:
-            from smartapi import SmartConnectException
+        except Exception:
+            pass
     except ImportError:
-        # रास्ता 3: रेंडर का स्पेशल डायरेक्ट मॉड्यूल रूट
         try:
             from SmartConnect import SmartConnect
-            SmartConnectException = Exception
         except ImportError:
-            raise ImportError("Angel One SmartAPI package missing from Render. Check requirements.txt")
+            # अगर पूरी लाइब्रेरी ही गायब होगी, केवल तभी यह क्रैश करेगा
+            raise ImportError("CRITICAL: SmartApi package not found in virtualenv!")
 
 # Local modules
 from db_handler import DBHandler
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NiftyInstitutionalEngine")
