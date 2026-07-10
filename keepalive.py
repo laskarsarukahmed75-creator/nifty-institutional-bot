@@ -26,7 +26,7 @@ def health_check():
     
     return jsonify({
         "status": "operational" if status == "running" else "inactive",
-        "message": "SBNiftybot Institutional Engine (15m Structure) is live",
+        "message": "niftyinstitutionalbot Institutional Engine (15m Structure) is live",
         "engine_status": status,
         "operation_mode": is_paused,
         "current_time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()
