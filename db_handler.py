@@ -8,7 +8,7 @@ import logging
 from typing import Optional, List, Dict, Any
 import os
 
-DB_PATH = os.environ.get("DB_PATH", "/app/data/sbniftybot.db")
+DB_PATH = os.environ.get("DB_PATH", "/app/data/niftyinstitutionalbot.db")
 
 logger = logging.getLogger("DBHandler")
 
