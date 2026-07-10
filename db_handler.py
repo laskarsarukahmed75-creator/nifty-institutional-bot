@@ -52,9 +52,9 @@ class DBHandler:
 
     def save_vector(self, symbol: str, swing_high: float, swing_low: float,
                     length: float, pivot_0_5: float,
-                    parent_high: Optional[float] = None,
-                    parent_low: Optional[float] = None,
-                    parent_len: Optional[float] = None,
+                    parent_swing_high: Optional[float] = None,
+                    parent_swing_low: Optional[float] = None,
+                    parent_length: Optional[float] = None,
                     parent_completed: Optional[bool] = None) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -64,7 +64,7 @@ class DBHandler:
                  parent_swing_high, parent_swing_low, parent_length, parent_completed, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (symbol, swing_high, swing_low, length, pivot_0_5,
-                  parent_high, parent_low, parent_len,
+                  parent_swing_high, parent_swing_low, parent_length,
                   1 if parent_completed else 0 if parent_completed is not None else None,
                   datetime.datetime.utcnow().isoformat()))
             conn.commit()
