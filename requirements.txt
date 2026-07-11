@@ -4,3 +4,4 @@ requests
 yfinance
 smartapi-python
 logzero
+websocket-client
