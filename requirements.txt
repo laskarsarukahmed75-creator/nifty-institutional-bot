@@ -3,5 +3,3 @@ gunicorn
 requests
 yfinance
 smartapi-python
-websocket-client
-python-telegram-bot
