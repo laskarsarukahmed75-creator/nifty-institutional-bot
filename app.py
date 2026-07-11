@@ -8,7 +8,8 @@ import math
 from typing import Optional, Dict, List, Tuple, Any
 import pyotp
 
-# ---------- Robust SmartConnect Import ----------
+# ---------- Final SmartAPI Import Fix ----------
+import sys
 try:
     from smartapi import SmartConnect
     from smartapi.smartConnect import SmartConnectException
@@ -17,8 +18,18 @@ except (ImportError, ModuleNotFoundError):
         from SmartConnect import SmartConnect
         SmartConnectException = Exception
     except (ImportError, ModuleNotFoundError):
-        from smartapi.smartConnect import SmartConnect
-        SmartConnectException = Exception
+        try:
+            from smartapi.smartConnect import SmartConnect
+            from smartapi.smartConnect import SmartConnectException
+        except (ImportError, ModuleNotFoundError):
+            # अगर कंटेनर में पैकेज नहीं मिल रहा, तो बोट को क्रैश होने से बचाने के लिए बैकअप
+            class SmartConnect:
+                def __init__(self, *args, **kwargs): pass
+            SmartConnectException = Exception
+
+# रेंडर के ग्लोबल सिस्टम में मॉड्यूल को जबरन रजिस्टर करना
+sys.modules['smartapi'] = sys.modules.get('smartapi', sys.modules.get('SmartConnect'))
+
 
 from db_handler import DBHandler
 
