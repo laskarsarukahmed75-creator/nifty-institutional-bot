@@ -2,11 +2,12 @@ import time
 import threading
 import os
 from datetime import datetime
-from config import SMART_API_KEY, SMART_CLIENT_ID, SMART_PASSWORD
+import requests
+import pyotp
+
+from config import SMART_API_KEY, SMART_CLIENT_ID, SMART_PASSWORD, DATA_SOURCES, DATA_INTERVAL
 from SmartApi import SmartConnect
 import yfinance as yf
-import requests
-from config import DATA_SOURCES, DATA_INTERVAL
 from cache import cache_get, cache_set
 from retry import retry
 from logger_setup import system_log, error_log
@@ -34,19 +35,27 @@ class DataStore:
             return self.data.copy()
 
 data_store = DataStore()
-# Initialize SmartAPI Connection
+
+# Initialize SmartAPI Connection with TOTP (Indentation Fixed)
 try:
     smart_api = SmartConnect(api_key=SMART_API_KEY)
-    session_data = smart_api.generateSession(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD)
+    totp_secret = os.getenv('SMART_TOTP_KEY')
+    totp = pyotp.TOTP(totp_secret).now() if totp_secret else ""
+    session_data = smart_api.generateSession(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=totp)
 except Exception as e:
     error_log.error(f"Angel One Login Failed: {e}")
 
 def _fetch_from_smartapi(symbol):
     try:
+        # DATA_SOURCES से सिंबल का सही टोकन नंबर निकालें
+        token = DATA_SOURCES.get(symbol)
+        if not token:
+            raise ValueError(f"No token token found for symbol: {symbol} in config")
+
         # Angel One की नई गाइडलाइन के अनुसार सही पैरामीटर्स
         params = {
             "exchange": "NSE",
-            "symboltoken": "YOUR_TOKEN_HERE",
+            "symboltoken": str(token),
             "interval": "ONE_MINUTE",
             "fromdate": datetime.now().strftime("%Y-%m-%d 09:15"),
             "todate": datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -65,6 +74,7 @@ def _fetch_from_smartapi(symbol):
             }
         else:
             raise ValueError(response.get('message', 'No data returned') if response else 'Empty response')
+            
     except Exception as e:
         error_log.error(f"SmartAPI failed for {symbol}: {e}")
         cached = cache_get(f"data_{symbol}")
