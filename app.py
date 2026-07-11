@@ -684,3 +684,20 @@ def __init__(self):
         self.running = False
         self._cancel_all_orders()
         logger.info("Engine shut down.")
+# --- रेंडर को खुश रखने के लिए अंत में Flask सर्वर ---
+import os
+from flask import Flask
+import threading
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health():
+    return "Nifty Trading Bot is Perfectly running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# बोट शुरू होने के साथ ही Flask को अलग थ्रेड में चलाएं
+threading.Thread(target=run_flask, daemon=True).start()
