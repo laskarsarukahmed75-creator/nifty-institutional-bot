@@ -62,3 +62,8 @@ SCORE_WEIGHTS = {
     "volatility": 10,
     "historical_similarity": 15
 }
+
+# Angel One SmartAPI Credentials
+SMART_API_KEY = os.getenv('SMART_API_KEY')
+SMART_CLIENT_ID = os.getenv('SMART_CLIENT_ID')
+SMART_PASSWORD = os.getenv('SMART_PASSWORD')
