@@ -3,3 +3,4 @@ gunicorn
 requests
 yfinance
 smartapi-python
+logzero
