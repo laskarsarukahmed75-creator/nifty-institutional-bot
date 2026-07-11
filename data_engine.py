@@ -2,6 +2,8 @@ import time
 import threading
 import os
 from datetime import datetime
+from config import SMART_API_KEY, SMART_CLIENT_ID, SMART_PASSWORD
+from smartapi import SmartConnect
 import yfinance as yf
 import requests
 from config import DATA_SOURCES, DATA_INTERVAL
