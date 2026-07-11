@@ -67,13 +67,12 @@ class NiftyInstitutionalEngine:
         "SENSEX": 99926010,
     }
 
-    def __init__(self):
-        
-                # टेलीग्राम को अलग रास्ते (Thread) पर तुरंत शुरू करने के लिए
-        import threading
-        threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
-        if not self.API_KEY or not self.CLIENT_ID or not self.PASSWORD:
-            raise ValueError("Missing Angel One credentials.")
+def __init__(self):  
+    # टेलीग्राम को अलग रास्ते (Thread) पर तुरंत शुरू करने के लिए
+    import threading
+    threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
+    if not self.API_KEY or not self.CLIENT_ID or not self.PASSWORD:
+        raise ValueError("Missing Angel One credentials.")
 
         self.db = DBHandler()
         self.obj: Optional[SmartConnect] = None
