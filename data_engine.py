@@ -34,6 +34,12 @@ class DataStore:
             return self.data.copy()
 
 data_store = DataStore()
+# Initialize SmartAPI Connection
+try:
+    smart_api = SmartConnect(api_key=SMART_API_KEY)
+    session_data = smart_api.generate_session(client_id=SMART_CLIENT_ID, password=SMART_PASSWORD)
+except Exception as e:
+    error_log.error(f"Angel One Login Failed: {e}")
 
 def _fetch_yahoo(symbol):
     ticker = yf.Ticker(symbol, session=data_store.session)
