@@ -41,7 +41,6 @@ try:
 except Exception as e:
     error_log.error(f"Angel One Login Failed: {e}")
 
-def _fetch_yahoo(symbol):
 def _fetch_from_smartapi(symbol):
     try:
         # Angel One SmartAPI से 1 मिनट का लाइव डेटा लेना
