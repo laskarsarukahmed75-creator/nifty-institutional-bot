@@ -1,12 +1,11 @@
 # keepalive.py
 import os
+import subprocess
 import threading
 import time
 import logging
 import datetime
 from flask import Flask, jsonify
-import requests
-from app import NiftyInstitutionalEngine
 
 # ---------- Logging Setup ----------
 logging.basicConfig(
@@ -16,76 +15,54 @@ logging.basicConfig(
 logger = logging.getLogger("KeepAliveServer")
 
 app = Flask(__name__)
-engine = None
+
+# 🚀 मास्टर स्ट्रोक: Gunicorn जैसे ही इस फाइल को पढ़ेगा, यह तुरंत 
+# आपके मुख्य बोट (app.py) को बैकग्राउंड में लॉन्च कर देगा।
+# इससे रेंडर का पोर्ट टाइमआउट एरर हमेशा के लिए खत्म हो जाएगा!
+try:
+    logger.info("Latching and spawning main trading engine (app.py) in isolated background process...")
+    subprocess.Popen(["python", "app.py"])
+except Exception as e:
+    logger.error(f"Failed to auto-spawn main bot engine: {e}")
 
 @app.route("/")
 def health_check():
-    """Render Web Service handles health check and returns engine status."""
-    status = "running" if engine and engine.running else "stopped"
-    is_paused = "paused" if engine and engine.paused else "active"
-    
+    """Render Web Service handles health check and returns portal status."""
     return jsonify({
-        "status": "operational" if status == "running" else "inactive",
-        "message": "niftyinstitutionalbot Institutional Engine (15m Structure) is live",
-        "engine_status": status,
-        "operation_mode": is_paused,
+        "status": "operational",
+        "message": "Nifty Institutional Bot Layer is live and bridging requests.",
         "current_time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()
     })
 
-@app.route("/stop")
-def stop_engine():
-    """Emergency route to manually stop the bot via browser/HTTP request."""
-    global engine
-    if engine:
-        engine.stop()
-        return jsonify({"status": "stopped", "message": "Engine shut down successfully."})
-    return jsonify({"status": "error", "message": "Engine was not running."})
-
-def start_engine_thread():
-    """Target function to boot the algorithmic engine in a separate daemon thread."""
-    global engine
-    logger.info("Waiting 5 seconds for system warm-up before initializing engine...")
-    time.sleep(5)
-    try:
-        engine = NiftyInstitutionalEngine()
-        engine.run()
-    except Exception as e:
-        logger.error(f"Algorithmic Core crashed unexpectedly: {e}", exc_info=True)
-
 def self_ping_loop():
-    """Anti-Sleep Loop: Keeps Render's free/hobby tier instances from sleeping."""
+    """Anti-Sleep Loop: Keeps Render's free tier instances from sleeping."""
+    import requests
     port = os.environ.get('PORT', '8080')
     base_url = f"http://127.0.0.1:{port}"
     
-    # Wait for Flask to boot completely
-    time.sleep(15)
-    logger.info(f"Self-ping cycle initiated against local fallback target: {base_url}")
+    # Flask को बूट होने का समय दें
+    time.sleep(20)
+    logger.info(f"Self-ping cycle initiated against local target: {base_url}")
     
     while True:
         try:
-            # Pings every 10 minutes (600 seconds)
             response = requests.get(base_url, timeout=10)
             if response.status_code == 200:
                 logger.info("Anti-sleep self-ping: SUCCESS (Instance is awake)")
             else:
-                logger.warning(f"Anti-sleep self-ping returned unexpected status: {response.status_code}")
+                logger.warning(f"Anti-sleep self-ping returned status: {response.status_code}")
         except Exception as e:
-            logger.error(f"Self-ping execution bottleneck encountered: {e}")
+            logger.error(f"Self-ping heartbeat check failed: {e}")
         
+        # हर 10 मिनट में पिंग करेगा
         time.sleep(600)
 
+# बैकग्राउंड पिंग थ्रेड को तुरंत चालू करें
+ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
+ping_thread.start()
+
 if __name__ == "__main__":
-    # 1. Start the main algorithmic trading engine in background
-    trading_thread = threading.Thread(target=start_engine_thread, daemon=True)
-    trading_thread.start()
-    
-    # 2. Start the anti-sleep manager to monitor local loopback
-    ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
-    ping_thread.start()
-    
-    # 3. Initialize Gunicorn-compatible Flask web portal
+    # लोकल टेस्टिंग के लिए फॉलबैक रनर
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Launching production Flask listener on port {port}...")
-    
-    # Running inside production container context
+    logger.info(f"Launching Flask fallback listener on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
