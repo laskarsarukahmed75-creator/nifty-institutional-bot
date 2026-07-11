@@ -68,6 +68,10 @@ class NiftyInstitutionalEngine:
     }
 
     def __init__(self):
+        
+                # टेलीग्राम को अलग रास्ते (Thread) पर तुरंत शुरू करने के लिए
+        import threading
+        threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
         if not self.API_KEY or not self.CLIENT_ID or not self.PASSWORD:
             raise ValueError("Missing Angel One credentials.")
 
@@ -90,10 +94,6 @@ class NiftyInstitutionalEngine:
         self.running = False
         self.paused = False
         self.last_trade_side = None
-                # टेलीग्राम को अलग रास्ते (Thread) पर तुरंत शुरू करने के लिए
-        import threading
-        threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
-
 
         # Vector tracking
         self.last_swing_high = None
