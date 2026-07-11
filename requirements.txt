@@ -6,3 +6,4 @@ smartapi-python
 logzero
 websocket-client
 psutil
+pyotp
