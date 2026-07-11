@@ -42,88 +42,40 @@ except Exception as e:
     error_log.error(f"Angel One Login Failed: {e}")
 
 def _fetch_yahoo(symbol):
-    ticker = yf.Ticker(symbol, session=data_store.session)
-    hist = ticker.history(period="1d", interval="1m")
-    if hist.empty:
-        raise ValueError("Empty data")
-    latest = hist.iloc[-1]
-    return {
-        "time": latest.name.to_pydatetime(),
-        "open": float(latest["Open"]),
-        "high": float(latest["High"]),
-        "low": float(latest["Low"]),
-        "close": float(latest["Close"]),
-        "volume": int(latest["Volume"])
-    }
-
-def _fetch_stooq(symbol):
-    url = f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
-    resp = data_store.session.get(url, timeout=5)
-    if resp.status_code != 200:
-        raise ValueError("Stooq error")
-    lines = resp.text.strip().split('\n')
-    if len(lines) < 2:
-        raise ValueError("No data from Stooq")
-    last = lines[-1].split(',')
-    if len(last) < 7:
-        raise ValueError("Invalid CSV format")
-    dt_str = last[0] + ' ' + last[1]
-    dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
-    return {
-        "time": dt,
-        "open": float(last[2]),
-        "high": float(last[3]),
-        "low": float(last[4]),
-        "close": float(last[5]),
-        "volume": int(float(last[6]))
-    }
-
-def _fetch_twelve(symbol):
-    apikey = os.environ.get("TWELVE_API_KEY", "")
-    if not apikey:
-        raise ValueError("No API key for TwelveData")
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&outputsize=1&apikey={apikey}"
-    resp = data_store.session.get(url, timeout=5)
-    if resp.status_code != 200:
-        raise ValueError("TwelveData error")
-    data = resp.json()
-    if "values" not in data or not data["values"]:
-        raise ValueError("No data from TwelveData")
-    last = data["values"][0]
-    dt = datetime.fromisoformat(last["datetime"])
-    return {
-        "time": dt,
-        "open": float(last["open"]),
-        "high": float(last["high"]),
-        "low": float(last["low"]),
-        "close": float(last["close"]),
-        "volume": int(last["volume"])
-    }
-
-@retry(max_attempts=3, backoff=2)
-def _fetch_data(symbol, yf_symbol, stooq_symbol, twelve_symbol):
+def _fetch_from_smartapi(symbol):
     try:
-        return _fetch_yahoo(yf_symbol)
+        # Angel One SmartAPI से 1 मिनट का लाइव डेटा लेना
+        response = smart_api.getCandleData(
+            exchange="NSE",
+            symboltoken="YOUR_TOKEN_HERE",
+            interval="ONE_MINUTE",
+            fromdate=datetime.now().strftime("%Y-%m-%d 09:15"),
+            todate=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+        if response['status'] and response['data']:
+            latest = response['data'][-1]  # सबसे आखिरी कैंडल निकालना
+            return {
+                "time": datetime.strptime(latest[0], "%Y-%m-%dT%H:%M:%S%z"),
+                "open": float(latest[1]),
+                "high": float(latest[2]),
+                "low": float(latest[3]),
+                "close": float(latest[4]),
+                "volume": int(latest[5])
+            }
+        else:
+            raise ValueError(response.get('message', 'No data returned'))
     except Exception as e:
-        error_log.warning(f"Yahoo failed for {symbol}: {e}")
-        try:
-            return _fetch_stooq(stooq_symbol)
-        except Exception as e2:
-            error_log.warning(f"Stooq failed for {symbol}: {e2}")
-            try:
-                return _fetch_twelve(twelve_symbol)
-            except Exception as e3:
-                error_log.warning(f"TwelveData failed for {symbol}: {e3}")
-                cached = cache_get(f"data_{symbol}")
-                if cached:
-                    error_log.info(f"Using cached data for {symbol}")
-                    return cached
-                raise ValueError(f"All data sources failed for {symbol}")
+        error_log.error(f"SmartAPI failed for {symbol}: {e}")
+        cached = cache_get(f"data_{symbol}")
+        if cached:
+            error_log.info(f"Using cached data for {symbol}")
+            return cached
+        raise ValueError(f"SmartAPI failed and no cache available for {symbol}")
 
 def fetch_live_data():
-    for symbol, info in DATA_SOURCES.items():
+    for symbol in DATA_SOURCES.keys():
         try:
-            ohlcv = _fetch_data(symbol, info["yfinance"], info["stooq"], info["twelve"])
+            ohlcv = _fetch_from_smartapi(symbol)
             data_store.update(symbol, ohlcv)
             cache_set(f"data_{symbol}", ohlcv)
         except Exception as e:
