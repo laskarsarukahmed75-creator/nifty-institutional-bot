@@ -20,8 +20,9 @@ app = Flask(__name__)
 # आपके मुख्य बोट (app.py) को बैकग्राउंड में लॉन्च कर देगा।
 # इससे रेंडर का पोर्ट टाइमआउट एरर हमेशा के लिए खत्म हो जाएगा!
 try:
-    logger.info("Latching and spawning main trading engine (app.py) in isolated background process...")
-    subprocess.Popen(["python", "app.py"])
+    logger.info("Latching and spawning main trading engine (app.py)...")
+    # -u लगाने से असली बोट का जो भी एरर होगा, वह तुरंत रेंडर के लॉग्स में दिखने लगेगा
+    subprocess.Popen(["python", "-u", "app.py"])
 except Exception as e:
     logger.error(f"Failed to auto-spawn main bot engine: {e}")
 
