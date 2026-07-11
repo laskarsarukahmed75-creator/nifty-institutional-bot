@@ -4,12 +4,32 @@ import time
 import logging
 import threading
 import datetime
-import math
-from typing import Optional, Dict, List, Tuple, Any
-import pyotp
-
-# ---------- Final SmartAPI Import Fix ----------
 import sys
+from typing import Optional, Dict, List, Tuple, Any
+
+# ---------- Environment Validation ----------
+REQUIRED_ENV = [
+    "ANGEL_API_KEY", "ANGEL_CLIENT_ID", "ANGEL_PASSWORD",
+    "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"
+]
+missing = [v for v in REQUIRED_ENV if not os.environ.get(v)]
+if missing:
+    print(f"❌ Missing required env vars: {missing}", file=sys.stderr)
+    sys.exit(1)   # Fail fast on Render
+
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("NiftyBot")
+
+# ---------- Imports (after logging) ----------
+import pyotp
+import requests
+from flask import Flask, jsonify
+
+# SmartConnect import (robust)
 try:
     from smartapi import SmartConnect
     from smartapi.smartConnect import SmartConnectException
@@ -18,73 +38,80 @@ except (ImportError, ModuleNotFoundError):
         from SmartConnect import SmartConnect
         SmartConnectException = Exception
     except (ImportError, ModuleNotFoundError):
-        try:
-            from smartapi.smartConnect import SmartConnect
-            from smartapi.smartConnect import SmartConnectException
-        except (ImportError, ModuleNotFoundError):
-            # अगर कंटेनर में पैकेज नहीं मिल रहा, तो बोट को क्रैश होने से बचाने के लिए बैकअप
-            class SmartConnect:
-                def __init__(self, *args, **kwargs): pass
-            SmartConnectException = Exception
-
-# रेंडर के ग्लोबल सिस्टम में मॉड्यूल को जबरन रजिस्टर करना
-sys.modules['smartapi'] = sys.modules.get('smartapi', sys.modules.get('SmartConnect'))
-
+        from smartapi.smartConnect import SmartConnect
+        SmartConnectException = Exception
 
 from db_handler import DBHandler
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("NiftyInstitutionalEngine")
+# ---------- Flask App ----------
+flask_app = Flask(__name__)
+engine = None   # global reference to the trading engine
 
+@flask_app.route("/")
+def health():
+    status = "running" if engine and engine.running else "stopped"
+    return jsonify({
+        "status": "active" if status == "running" else "inactive",
+        "engine": status,
+        "message": "Nifty Institutional Bot is operational"
+    })
+
+@flask_app.route("/stop")
+def stop_engine():
+    global engine
+    if engine:
+        engine.stop()
+        return jsonify({"status": "stopped"})
+    return jsonify({"status": "engine not running"})
+
+def run_flask():
+    """Run Flask server on Render-assigned port."""
+    port = int(os.environ.get("PORT", 8080))
+    logger.info(f"Starting Flask server on port {port}")
+    flask_app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
+# ---------- Core Engine Class ----------
 class NiftyInstitutionalEngine:
-    # ---------- Environment Variables ----------
-    API_KEY = os.environ.get("ANGEL_API_KEY", "")
-    CLIENT_ID = os.environ.get("ANGEL_CLIENT_ID", "")
-    PASSWORD = os.environ.get("ANGEL_PASSWORD", "")
-    TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET", None)
+    def __init__(self):
+        self.API_KEY = os.environ["ANGEL_API_KEY"]
+        self.CLIENT_ID = os.environ["ANGEL_CLIENT_ID"]
+        self.PASSWORD = os.environ["ANGEL_PASSWORD"]
+        self.TOTP_SECRET = os.environ.get("ANGEL_TOTP_SECRET")
 
-    TRADE_SYMBOL = os.environ.get("TRADE_SYMBOL", "NIFTY").upper()
-    INSTRUMENT_TYPE = "NSE"
-    PRODUCT_TYPE = "INTRADAY"
-    TIMEFRAME = "5m"
+        self.TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+        self.TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-    SL_BUFFER_POINTS = 4.0
-    RISK_REWARD_RATIO = 10.0
-    TOLERANCE = 0.5
-    LOOKBACK_CANDLES = 150
-    QUANTITY = int(os.environ.get("TRADE_QUANTITY", 25))
+        self.TRADE_SYMBOL = os.environ.get("TRADE_SYMBOL", "NIFTY").upper()
+        self.QUANTITY = int(os.environ.get("TRADE_QUANTITY", 25))
+        self.INSTRUMENT_TYPE = "NSE"
+        self.PRODUCT_TYPE = "INTRADAY"
+        self.TIMEFRAME = "5m"
 
-    MIN_VOLUME = 100000
-    MIN_ATR = 20.0
-    LOCK_POINT_BUFFER = 2.0
+        self.SL_BUFFER_POINTS = 4.0
+        self.RISK_REWARD_RATIO = 10.0
+        self.TOLERANCE = 0.5
+        self.LOOKBACK_CANDLES = 150
+        self.MIN_VOLUME = 100000
+        self.MIN_ATR = 20.0
+        self.LOCK_POINT_BUFFER = 2.0
 
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-    SYMBOL_TOKENS = {
-        "NIFTY": 99926000,
-        "BANKNIFTY": 99926009,
-        "SENSEX": 99926010,
-    }
-
-def __init__(self):  
-    # टेलीग्राम को अलग रास्ते (Thread) पर तुरंत शुरू करने के लिए
-    import threading
-    threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
-    if not self.API_KEY or not self.CLIENT_ID or not self.PASSWORD:
-        raise ValueError("Missing Angel One credentials.")
+        self.SYMBOL_TOKENS = {
+            "NIFTY": 99926000,
+            "BANKNIFTY": 99926009,
+            "SENSEX": 99926010,
+        }
 
         self.db = DBHandler()
         self.obj: Optional[SmartConnect] = None
-        self.auth_token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
-        self.feed_token: Optional[str] = None
-        self.user_profile: Optional[Dict] = None
+        self.auth_token = None
+        self.refresh_token = None
+        self.feed_token = None
+        self.user_profile = None
 
         self.symbol = self.TRADE_SYMBOL
         self.token = self.SYMBOL_TOKENS.get(self.symbol)
         if not self.token:
-            raise ValueError(f"Symbol {self.symbol} not in token map.")
+            raise ValueError(f"Unknown symbol: {self.symbol}")
 
         self.position_open = False
         self.order_ids = []
@@ -94,35 +121,30 @@ def __init__(self):
         self.paused = False
         self.last_trade_side = None
 
-        # Vector tracking
         self.last_swing_high = None
         self.last_swing_low = None
         self.last_vector_length = None
         self.pivot_0_5 = None
         self.lock_point = None
         self.structure_reset = False
-
         self.parent_swing_high = None
         self.parent_swing_low = None
         self.parent_length = None
         self.parent_completed = False
-
         self.trendline_highs = []
         self.trendline_lows = []
         self.last_15m_ohlc = None
 
-        logger.info("Engine initialised.")
+        logger.info("Engine initialized (not logged in yet).")
 
     # ---------- Telegram ----------
     def _send_telegram(self, message: str):
-        if self.TELEGRAM_TOKEN and self.TELEGRAM_CHAT_ID:
-            try:
-                import requests
-                url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/sendMessage"
-                payload = {"chat_id": self.TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-                requests.post(url, json=payload, timeout=5)
-            except Exception as e:
-                logger.warning(f"Telegram send failed: {e}")
+        try:
+            url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/sendMessage"
+            payload = {"chat_id": self.TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+            requests.post(url, json=payload, timeout=5)
+        except Exception as e:
+            logger.warning(f"Telegram send failed: {e}")
 
     # ---------- Authentication ----------
     def _login(self) -> None:
@@ -201,15 +223,10 @@ def __init__(self):
             })
         return candles[-limit:] if len(candles) > limit else candles
 
-    # ---------- Multi‑Timeframe (15m) Merge – FIXED (no candle dropping) ----------
+    # ---------- 15m Merge ----------
     def _merge_15m_candles(self, candles_5m: List[Dict]) -> List[Dict]:
-        """
-        Group 5m candles into 15m OHLC.
-        API provides only closed candles, so we merge all.
-        """
         if len(candles_5m) < 3:
-            return candles_5m  # fallback
-
+            return candles_5m
         grouped = {}
         for c in candles_5m:
             dt = datetime.datetime.fromisoformat(c['time'].replace('Z', '+00:00'))
@@ -229,25 +246,22 @@ def __init__(self):
                 grouped[key]['low'] = min(grouped[key]['low'], c['low'])
                 grouped[key]['close'] = c['close']
                 grouped[key]['volume'] += c['volume']
-        # Return sorted list
         return sorted(grouped.values(), key=lambda x: x['time'])
 
-    # ---------- Data Quality Filter ----------
+    # ---------- Data Quality ----------
     def _is_data_good(self, candles: List[Dict]) -> bool:
         if len(candles) < 10:
             return False
         avg_vol = sum(c['volume'] for c in candles[-10:]) / 10
         if avg_vol < self.MIN_VOLUME:
-            logger.info(f"Low volume: {avg_vol} < {self.MIN_VOLUME}")
             return False
         ranges = [c['high'] - c['low'] for c in candles[-10:]]
         atr = sum(ranges) / len(ranges)
         if atr < self.MIN_ATR:
-            logger.info(f"Low ATR: {atr} < {self.MIN_ATR}")
             return False
         return True
 
-    # ---------- Swing Detection (works on any timeframe) ----------
+    # ---------- Swing Detection ----------
     def _detect_all_swings(self, candles: List[Dict]) -> List[Dict]:
         highs = [c['high'] for c in candles]
         lows = [c['low'] for c in candles]
@@ -326,7 +340,7 @@ def __init__(self):
                 'length': p_len,
                 'completed': completed
             }
-            lock_point = p_end['price']  # the level that acts as support/resistance
+            lock_point = p_end['price']
             if direction == 1 and swing_high > parent_info['high']:
                 structure_reset = True
             elif direction == -1 and swing_low < parent_info['low']:
@@ -334,7 +348,6 @@ def __init__(self):
 
         return swing_high, swing_low, length, direction, parent_info, lock_point, structure_reset
 
-    # ---------- Trendlines ----------
     def _update_trendlines(self, pivots: List[Dict]):
         highs = [p for p in pivots if p['type'] == 'high']
         lows = [p for p in pivots if p['type'] == 'low']
@@ -349,14 +362,11 @@ def __init__(self):
         recent_high = max(c['high'] for c in candles[-10:])
         recent_low = min(c['low'] for c in candles[-10:])
         range_pct = (recent_high - recent_low) / recent_low * 100
-        if range_pct < 0.5:
-            return True
-        return False
+        return range_pct < 0.5
 
     # ---------- Order Execution ----------
     def _place_orders(self, side: str, entry_price: float, sl_price: float, tp_price: float):
         self.last_trade_side = side
-
         entry_params = {
             "variety": "NORMAL",
             "tradingsymbol": self.symbol,
@@ -420,8 +430,7 @@ def __init__(self):
         self.db.log_trade(self.symbol, side, entry_price, sl_price, tp_price, "OPEN")
         logger.info(f"Orders placed: entry {entry_id}, SL {sl_id}, TP {tp_id}")
         self._send_telegram(
-            f"📈 <b>Trade Executed</b>\n"
-            f"Symbol: {self.symbol}\nSide: {side}\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}"
+            f"📈 <b>Trade Executed</b>\nSymbol: {self.symbol}\nSide: {side}\nEntry: {entry_price}\nSL: {sl_price}\nTP: {tp_price}"
         )
 
     def _emergency_exit(self, side: str):
@@ -460,7 +469,6 @@ def __init__(self):
                 logger.warning(f"Failed to cancel {oid}: {e}")
         self.order_ids.clear()
 
-    # ---------- Position Monitoring ----------
     def _check_position_closed(self) -> bool:
         if not self.position_open:
             return True
@@ -494,21 +502,19 @@ def __init__(self):
             logger.warning(f"Order status check error: {e}")
         return False
 
-
-# ---------- Telegram Command Handler ----------
+    # ---------- Telegram Command Handler (long polling) ----------
     def _handle_telegram_commands(self):
-        if not self.TELEGRAM_TOKEN:
-            return
-        import requests
-        # बोट शुरू होते ही टेलीग्राम पर एक्टिवेशन मैसेज भेजेगा
-        self._send_telegram("🚀 Great! Connected to Nifty Institutional Bot.")
-        
+        """Long-polling Telegram for commands. Runs in a separate thread."""
+        logger.info("Starting Telegram command polling...")
         last_update_id = self.db.get_state("telegram_last_update_id", 0)
         url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/getUpdates"
-        
-        while True:
+        while self.running:
             try:
-                resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 10})
+                resp = requests.get(
+                    url,
+                    params={"offset": last_update_id + 1, "timeout": 10},
+                    timeout=15
+                )
                 if resp.status_code == 200:
                     updates = resp.json().get('result', [])
                     for update in updates:
@@ -520,6 +526,8 @@ def __init__(self):
                     self.db.set_state("telegram_last_update_id", last_update_id)
             except Exception as e:
                 logger.error(f"Telegram polling error: {e}")
+                # Wait a bit before retrying to avoid tight loop on error
+                time.sleep(5)
             time.sleep(2)
 
     def _process_command(self, cmd: str, msg: Dict):
@@ -527,18 +535,14 @@ def __init__(self):
         if str(chat_id) != self.TELEGRAM_CHAT_ID:
             return
         reply = ""
-        
-        # /start कमांड के लिए आपकी पसंद का रिप्लाई
-        if cmd == '/start':
-            reply = "👍 OK! Great! Connected to the Bot. Type /status to check current engine status."
-        elif cmd == '/pause':
+        if cmd == '/pause':
             self.paused = True
             reply = "⏸️ Bot paused. No new trades."
         elif cmd == '/resume':
             self.paused = False
             reply = "▶️ Bot resumed."
         elif cmd == '/exit':
-            if getattr(self, 'position_open', False) and getattr(self, 'last_trade_side', None):
+            if self.position_open and self.last_trade_side:
                 self._emergency_exit(self.last_trade_side)
                 reply = "🚪 Position closed manually via /exit."
             else:
@@ -546,16 +550,15 @@ def __init__(self):
         elif cmd == '/hold':
             reply = "🔒 Trailing mode activated (SL moved to entry)."
         elif cmd == '/status':
-            engine_run_status = "Running 🟢" if getattr(self, 'running', False) else "Stopped/Weekend 🔴"
             reply = (f"📊 <b>Bot Status</b>\n"
-                     f"Engine: {engine_run_status}\n"
-                     f"Symbol: {getattr(self, 'symbol', 'NIFTY')}\n"
-                     f"Position: {'Open' if getattr(self, 'position_open', False) else 'Closed'}\n"
-                     f"Paused: {'Yes' if getattr(self, 'paused', False) else 'No'}\n"
-                     f"Note: Weekend or Angel One login pending.")
+                     f"Symbol: {self.symbol}\n"
+                     f"Position: {'Open' if self.position_open else 'Closed'}\n"
+                     f"Paused: {'Yes' if self.paused else 'No'}\n"
+                     f"Last Pivot: {self.pivot_0_5}\n"
+                     f"Lock Point: {self.lock_point}\n"
+                     f"Structure Reset: {self.structure_reset}")
         else:
-            reply = "Unknown command. Available: /start, /pause, /resume, /exit, /hold, /status"
-        
+            reply = "Unknown command. Available: /pause, /resume, /exit, /hold, /status"
         if reply:
             self._send_telegram(reply)
 
@@ -566,8 +569,10 @@ def __init__(self):
         logger.info("Engine started. Monitoring for 0.5 pivot retests on 15m structure...")
         self._ensure_session()
 
-        if self.TELEGRAM_TOKEN:
-            threading.Thread(target=self._handle_telegram_commands, daemon=True).start()
+        # Start Telegram polling in a separate daemon thread
+        telegram_thread = threading.Thread(target=self._handle_telegram_commands, daemon=True)
+        telegram_thread.start()
+        logger.info("Telegram polling thread started.")
 
         while self.running:
             try:
@@ -583,10 +588,8 @@ def __init__(self):
                     time.sleep(5)
                     continue
 
-                # Merge to 15m (only closed candles)
                 candles_15m = self._merge_15m_candles(candles_5m)
                 self.last_15m_ohlc = candles_15m[-1] if candles_15m else None
-
                 current_price = self._get_ltp()
 
                 if not self._is_data_good(candles_5m):
@@ -594,7 +597,6 @@ def __init__(self):
                     time.sleep(30)
                     continue
 
-                # ---------- Swing detection on 15m data ----------
                 sh, sl, length, direction, parent_info, lock_point, structure_reset = self._detect_swing_vector(candles_15m)
                 self.last_swing_high = sh
                 self.last_swing_low = sl
@@ -603,11 +605,9 @@ def __init__(self):
                 self.lock_point = lock_point
                 self.structure_reset = structure_reset
 
-                # Update trendlines using 15m pivots
                 pivots = self._detect_all_swings(candles_15m)
                 self._update_trendlines(pivots)
 
-                # Save vector (using 15m data)
                 self.db.save_vector(
                     self.symbol, sh, sl, length, self.pivot_0_5,
                     lock_point=lock_point,
@@ -621,24 +621,21 @@ def __init__(self):
                 if structure_reset:
                     logger.info("Structure reset detected – clearing old levels.")
 
-                # Consolidation check on 5m (faster)
                 if self._is_in_consolidation(candles_5m):
                     logger.info("Market in consolidation – pausing entry.")
                     time.sleep(10)
                     continue
 
-                # Lock Point check (support/resistance)
                 if lock_point is not None:
                     if direction == 1 and current_price < lock_point - self.LOCK_POINT_BUFFER:
-                        logger.info("Price below lock point (support) – no entry yet.")
+                        logger.info("Price below lock point – no entry yet.")
                         time.sleep(5)
                         continue
                     elif direction == -1 and current_price > lock_point + self.LOCK_POINT_BUFFER:
-                        logger.info("Price above lock point (resistance) – no entry yet.")
+                        logger.info("Price above lock point – no entry yet.")
                         time.sleep(5)
                         continue
 
-                # Retest of 0.5 pivot (based on 15m pivot) using LTP
                 if abs(current_price - self.pivot_0_5) <= self.TOLERANCE and not self.position_open and not self._entry_triggered:
                     side = None
                     if direction == 1 and current_price >= self.pivot_0_5:
@@ -647,7 +644,6 @@ def __init__(self):
                         side = 'SELL'
 
                     if side:
-                        # Use latest 5m candle for tight SL buffer
                         latest_5m = candles_5m[-1]
                         if side == 'BUY':
                             sl_price = latest_5m['low'] - self.SL_BUFFER_POINTS
@@ -684,20 +680,17 @@ def __init__(self):
         self.running = False
         self._cancel_all_orders()
         logger.info("Engine shut down.")
-# --- रेंडर को खुश रखने के लिए अंत में Flask सर्वर ---
-import os
-from flask import Flask
-import threading
 
-flask_app = Flask(__name__)
+# ---------- Main Entry Point ----------
+if __name__ == "__main__":
+    # Create engine instance
+    global engine
+    engine = NiftyInstitutionalEngine()
 
-@flask_app.route('/')
-def health():
-    return "Nifty Trading Bot is Perfectly running!"
+    # Start engine in a separate thread (so Flask can run concurrently)
+    engine_thread = threading.Thread(target=engine.run, daemon=True)
+    engine_thread.start()
+    logger.info("Engine thread started.")
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
-
-# बोट शुरू होने के साथ ही Flask को अलग थ्रेड में चलाएं
-threading.Thread(target=run_flask, daemon=True).start()
+    # Start Flask server (this blocks the main thread)
+    run_flask()
