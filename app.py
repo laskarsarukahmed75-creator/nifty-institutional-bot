@@ -491,14 +491,19 @@ class NiftyInstitutionalEngine:
             logger.warning(f"Order status check error: {e}")
         return False
 
-    # ---------- Telegram Command Handler ----------
+
+# ---------- Telegram Command Handler ----------
     def _handle_telegram_commands(self):
         if not self.TELEGRAM_TOKEN:
             return
         import requests
+        # बोट शुरू होते ही टेलीग्राम पर एक्टिवेशन मैसेज भेजेगा
+        self._send_telegram("🚀 Great! Connected to Nifty Institutional Bot.")
+        
         last_update_id = self.db.get_state("telegram_last_update_id", 0)
         url = f"https://api.telegram.org/bot{self.TELEGRAM_TOKEN}/getUpdates"
-        while self.running:
+        
+        while True:
             try:
                 resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 10})
                 if resp.status_code == 200:
@@ -519,14 +524,18 @@ class NiftyInstitutionalEngine:
         if str(chat_id) != self.TELEGRAM_CHAT_ID:
             return
         reply = ""
-        if cmd == '/pause':
+        
+        # /start कमांड के लिए आपकी पसंद का रिप्लाई
+        if cmd == '/start':
+            reply = "👍 OK! Great! Connected to the Bot. Type /status to check current engine status."
+        elif cmd == '/pause':
             self.paused = True
             reply = "⏸️ Bot paused. No new trades."
         elif cmd == '/resume':
             self.paused = False
             reply = "▶️ Bot resumed."
         elif cmd == '/exit':
-            if self.position_open and self.last_trade_side:
+            if getattr(self, 'position_open', False) and getattr(self, 'last_trade_side', None):
                 self._emergency_exit(self.last_trade_side)
                 reply = "🚪 Position closed manually via /exit."
             else:
@@ -534,15 +543,16 @@ class NiftyInstitutionalEngine:
         elif cmd == '/hold':
             reply = "🔒 Trailing mode activated (SL moved to entry)."
         elif cmd == '/status':
+            engine_run_status = "Running 🟢" if getattr(self, 'running', False) else "Stopped/Weekend 🔴"
             reply = (f"📊 <b>Bot Status</b>\n"
-                     f"Symbol: {self.symbol}\n"
-                     f"Position: {'Open' if self.position_open else 'Closed'}\n"
-                     f"Paused: {'Yes' if self.paused else 'No'}\n"
-                     f"Last Pivot: {self.pivot_0_5}\n"
-                     f"Lock Point: {self.lock_point}\n"
-                     f"Structure Reset: {self.structure_reset}")
+                     f"Engine: {engine_run_status}\n"
+                     f"Symbol: {getattr(self, 'symbol', 'NIFTY')}\n"
+                     f"Position: {'Open' if getattr(self, 'position_open', False) else 'Closed'}\n"
+                     f"Paused: {'Yes' if getattr(self, 'paused', False) else 'No'}\n"
+                     f"Note: Weekend or Angel One login pending.")
         else:
-            reply = "Unknown command. Available: /pause, /resume, /exit, /hold, /status"
+            reply = "Unknown command. Available: /start, /pause, /resume, /exit, /hold, /status"
+        
         if reply:
             self._send_telegram(reply)
 
