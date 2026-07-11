@@ -3,7 +3,10 @@ gunicorn
 requests
 yfinance
 smartapi-python
-logzero
-websocket-client
-psutil
+logzero          # ✅ SmartApi की अंदरूनी ज़रूरत
+websocket-client # ✅ Websocket के लिए ज़रूरी
+psutil           # ✅ health.py के लिए ज़रूरी
 pyotp
+python-telegram-bot
+schedule
+cachetools
