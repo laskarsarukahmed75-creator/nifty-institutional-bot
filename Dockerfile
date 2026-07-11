@@ -6,7 +6,10 @@ WORKDIR /app
 RUN mkdir -p /app/data
 
 COPY requirements.txt .
+
+# [यहाँ बदलाव करें - पैकेजेस को सीधे फ़ोर्स इंस्टॉल करें]
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir smartapi-python pyotp Flask requests gunicorn python-telegram-bot
 
 COPY . .
 
