@@ -9,12 +9,6 @@ DATA_SOURCES = {
     "BANKNIFTY": "99926009"   # अपना सही NSE Index Token डालें
 }
 
-# Data sources (priority order)
-DATA_SOURCES = {
-    "NIFTY": {"symbol": "NSEI", "yfinance": "NSEI", "stooq": "nifty", "twelve": "NIFTY"},
-    "BANKNIFTY": {"symbol": "NSEBANK", "yfinance": "NSEBANK", "stooq": "banknifty", "twelve": "BANKNIFTY"}
-}
-
 # Update intervals (seconds)
 DATA_INTERVAL = 5
 STRUCTURE_INTERVAL = 10
