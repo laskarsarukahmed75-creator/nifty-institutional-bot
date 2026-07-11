@@ -5,8 +5,8 @@ from datetime import datetime
 import requests
 import pyotp
 
-from config import SMART_API_KEY, SMART_CLIENT_ID, SMART_PASSWORD, DATA_SOURCES, DATA_INTERVAL
-from SmartApi import SmartConnect
+from config import SMART_API_KEY, SMART_CLIENT_ID, SMART_PASSWORD, DATA_SOURCES
+from SmartApi import SmartConnect  # ✅ कैपिटल S और A के साथ फिक्स किया गया
 import yfinance as yf
 from cache import cache_get, cache_set
 from retry import retry
@@ -36,30 +36,71 @@ class DataStore:
 
 data_store = DataStore()
 
-# Initialize SmartAPI Connection with TOTP (Indentation Fixed)
+# --- SmartAPI Global Object ---
+smart_api = None
+smart_api_lock = threading.Lock()
+
+def init_smartapi():
+    """SmartAPI को Initialize करें और Access Token सेट करें"""
+    global smart_api
+    with smart_api_lock:
+        try:
+            system_log.info("Initializing SmartAPI connection...")
+            
+            # 1. API Key से Connect करें
+            obj = SmartConnect(api_key=SMART_API_KEY)
+            
+            # 2. TOTP handle करें (अगर सेट है तो, वरना खाली)
+            totp_secret = os.getenv('SMART_TOTP_KEY')
+            totp_val = pyotp.TOTP(totp_secret).now() if totp_secret else ""
+            
+            # 3. Session Generate करें
+            session_data = obj.generateSession(
+                clientCode=SMART_CLIENT_ID, 
+                password=SMART_PASSWORD, 
+                totp=totp_val
+            )
+            
+            # 4. Access Token सेट करें (Token Missing एरर फिक्स)
+            obj.setAccessToken(session_data['access_token'])
+            
+            system_log.info("SmartAPI Login Successful. Token Set.")
+            smart_api = obj
+            return obj
+            
+        except Exception as e:
+            error_log.error(f"SmartAPI Init Failed: {e}")
+            smart_api = None
+            raise
+
+# सर्वर शुरू होते ही पहला लॉगिन प्रयास
 try:
-    smart_api = SmartConnect(api_key=SMART_API_KEY)
-    totp_secret = os.getenv('SMART_TOTP_KEY')
-    totp = pyotp.TOTP(totp_secret).now() if totp_secret else ""
-    session_data = smart_api.generateSession(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=totp)
+    init_smartapi()
 except Exception as e:
-    error_log.error(f"Angel One Login Failed: {e}")
+    error_log.error(f"Startup SmartAPI error: {e}")
+    smart_api = None
 
 def _fetch_from_smartapi(symbol):
+    global smart_api
+    
+    # अगर API उपलब्ध नहीं है, तो दोबारा री-लॉगिन करें
+    if smart_api is None:
+        system_log.warning("SmartAPI not available. Re-initializing...")
+        init_smartapi()
+
     try:
-        # DATA_SOURCES से सिंबल का सही टोकन नंबर निकालें
         token = DATA_SOURCES.get(symbol)
         if not token:
-            raise ValueError(f"No token token found for symbol: {symbol} in config")
+            raise ValueError(f"No token for symbol: {symbol}")
 
-        # Angel One की नई गाइडलाइन के अनुसार सही पैरामीटर्स
         params = {
             "exchange": "NSE",
             "symboltoken": str(token),
-            "interval": "ONE_MINUTE",
+            "interval": "FIVE_MINUTE",
             "fromdate": datetime.now().strftime("%Y-%m-%d 09:15"),
             "todate": datetime.now().strftime("%Y-%m-%d %H:%M")
         }
+        
         response = smart_api.getCandleData(params)
         
         if response and response.get('status') and response.get('data'):
@@ -73,14 +114,24 @@ def _fetch_from_smartapi(symbol):
                 "volume": int(latest[5])
             }
         else:
-            raise ValueError(response.get('message', 'No data returned') if response else 'Empty response')
+            error_msg = response.get('message', 'No data') if response else 'Empty response'
+            raise ValueError(f"API Error: {error_msg}")
             
     except Exception as e:
         error_log.error(f"SmartAPI failed for {symbol}: {e}")
+        
+        # पुराना कैश डेटा चेक करें
         cached = cache_get(f"data_{symbol}")
         if cached:
             error_log.info(f"Using cached data for {symbol}")
             return cached
+            
+        # अगर टोकन एक्सपायर या मिसिंग हो, तो दोबारा री-लॉगिन करके प्रयास करें
+        if "Token missing" in str(e) or "AG8003" in str(e):
+            system_log.warning("Token expired or missing. Re-login attempt...")
+            init_smartapi()
+            return _fetch_from_smartapi(symbol) 
+        
         raise ValueError(f"SmartAPI failed and no cache available for {symbol}")
 
 def fetch_live_data():
@@ -89,6 +140,7 @@ def fetch_live_data():
             ohlcv = _fetch_from_smartapi(symbol)
             data_store.update(symbol, ohlcv)
             cache_set(f"data_{symbol}", ohlcv)
+            system_log.info(f"Data updated for {symbol}")
         except Exception as e:
             error_log.error(f"Error fetching {symbol}: {e}")
 
