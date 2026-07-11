@@ -2,3 +2,4 @@ yfinance
 Flask
 requests
 psutil
+smartapi-python
