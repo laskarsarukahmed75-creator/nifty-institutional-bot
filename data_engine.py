@@ -37,22 +37,24 @@ data_store = DataStore()
 # Initialize SmartAPI Connection
 try:
     smart_api = SmartConnect(api_key=SMART_API_KEY)
-    session_data = smart_api.generateSession(client_id=SMART_CLIENT_ID, password=SMART_PASSWORD)
+    session_data = smart_api.generateSession(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD)
 except Exception as e:
     error_log.error(f"Angel One Login Failed: {e}")
 
 def _fetch_from_smartapi(symbol):
     try:
-        # Angel One SmartAPI से 1 मिनट का लाइव डेटा लेना
-        response = smart_api.getCandleData(
-            exchange="NSE",
-            symboltoken="YOUR_TOKEN_HERE",
-            interval="ONE_MINUTE",
-            fromdate=datetime.now().strftime("%Y-%m-%d 09:15"),
-            todate=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
-        if response['status'] and response['data']:
-            latest = response['data'][-1]  # सबसे आखिरी कैंडल निकालना
+        # Angel One की नई गाइडलाइन के अनुसार सही पैरामीटर्स
+        params = {
+            "exchange": "NSE",
+            "symboltoken": "YOUR_TOKEN_HERE",
+            "interval": "ONE_MINUTE",
+            "fromdate": datetime.now().strftime("%Y-%m-%d 09:15"),
+            "todate": datetime.now().strftime("%Y-%m-%d %H:%M")
+        }
+        response = smart_api.getCandleData(params)
+        
+        if response and response.get('status') and response.get('data'):
+            latest = response['data'][-1]
             return {
                 "time": datetime.strptime(latest[0], "%Y-%m-%dT%H:%M:%S%z"),
                 "open": float(latest[1]),
@@ -62,7 +64,7 @@ def _fetch_from_smartapi(symbol):
                 "volume": int(latest[5])
             }
         else:
-            raise ValueError(response.get('message', 'No data returned'))
+            raise ValueError(response.get('message', 'No data returned') if response else 'Empty response')
     except Exception as e:
         error_log.error(f"SmartAPI failed for {symbol}: {e}")
         cached = cache_get(f"data_{symbol}")
