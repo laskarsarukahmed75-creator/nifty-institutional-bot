@@ -1,5 +1,8 @@
-yfinance
-Flask
+flask
+gunicorn
 requests
-psutil
+yfinance
 smartapi-python
+websocket-client
+python-telegram-bot
+... (बाकी जो आपके कोड में use हो रही हैं)
