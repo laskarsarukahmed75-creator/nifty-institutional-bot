@@ -1,5 +1,14 @@
 import os
 
+SMART_API_KEY = os.getenv('SMART_API_KEY')
+SMART_CLIENT_ID = os.getenv('SMART_CLIENT_ID')
+SMART_PASSWORD = os.getenv('SMART_PASSWORD')
+
+DATA_SOURCES = {
+    "NIFTY": "99926000",      # अपना सही NSE Index Token डालें
+    "BANKNIFTY": "99926009"   # अपना सही NSE Index Token डालें
+}
+
 # Data sources (priority order)
 DATA_SOURCES = {
     "NIFTY": {"symbol": "NSEI", "yfinance": "NSEI", "stooq": "nifty", "twelve": "NIFTY"},
