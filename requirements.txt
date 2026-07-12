@@ -2,10 +2,10 @@ flask
 gunicorn
 requests
 yfinance
-smartapi-python
-logzero          # ✅ SmartApi की अंदरूनी ज़रूरत
-websocket-client # ✅ Websocket के लिए ज़रूरी
-psutil           # ✅ health.py के लिए ज़रूरी
+smartapi-python>=1.0.0
+logzero
+websocket-client
+psutil
 pyotp
 python-telegram-bot
 schedule
