@@ -1,4 +1,4 @@
-smartapi-pythonnce
+flask
 gunicorn
 requests
 smartapi-python>=1.0.0
@@ -9,3 +9,4 @@ pyotp
 python-telegram-bot
 schedule
 cachetools
+
