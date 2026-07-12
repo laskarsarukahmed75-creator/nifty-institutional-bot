@@ -1,4 +1,4 @@
-# data_engine.py – FINAL VERSION (Dynamic Import + TOTP + Auto-Fallback)
+# data_engine.py – ULTIMATE VERSION (Dynamic Methods + TOTP + 4-Way Fallback)
 
 import time
 import threading
@@ -19,7 +19,6 @@ except ImportError:
         SmartConnect = sc2
         print("✅ Imported SmartConnect from 'SmartApi'")
     except ImportError:
-        # If both fail, raise a clear error
         raise ImportError(
             "❌ Neither 'smartapi' nor 'SmartApi' module found.\n"
             "Please run: pip install smartapi-python --upgrade --no-cache-dir"
@@ -63,7 +62,7 @@ def init_smartapi():
     global smart_api
     with smart_api_lock:
         try:
-            # TOTP
+            # TOTP Generation
             totp_secret = os.getenv("TOTP_SECRET")
             if not totp_secret:
                 raise ValueError("TOTP_SECRET not set in environment.")
@@ -71,27 +70,34 @@ def init_smartapi():
             system_log.info(f"TOTP generated (length: {len(current_totp)})")
 
             obj = SmartConnect(api_key=SMART_API_KEY)
+            session_data = None
 
-            # Try client_id first, fallback to clientCode
+            # 🚀 4-WAY AUTOMATIC FALLBACK CORE LOCK
+            # तरीका 1: generate_session + client_id
             try:
-                session_data = obj.generate_session(
-                    client_id=SMART_CLIENT_ID,
-                    password=SMART_PASSWORD,
-                    totp=current_totp
-                )
-                system_log.info("Login with 'client_id' succeeded.")
-            except TypeError:
-                system_log.warning("'client_id' failed, trying 'clientCode'...")
-                session_data = obj.generate_session(
-                    clientCode=SMART_CLIENT_ID,
-                    password=SMART_PASSWORD,
-                    totp=current_totp
-                )
-                system_log.info("Login with 'clientCode' succeeded.")
+                system_log.info("Trying Route 1: generate_session with client_id")
+                session_data = obj.generate_session(client_id=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=current_totp)
+            except (TypeError, AttributeError):
+                # तरीका 2: generate_session + clientCode
+                try:
+                    system_log.info("Trying Route 2: generate_session with clientCode")
+                    session_data = obj.generate_session(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=current_totp)
+                except (TypeError, AttributeError):
+                    # तरीका 3: generateSession + clientCode
+                    try:
+                        system_log.info("Trying Route 3: generateSession with clientCode")
+                        session_data = obj.generateSession(clientCode=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=current_totp)
+                    except (TypeError, AttributeError):
+                        # तरीका 4: generateSession + client_id
+                        system_log.info("Trying Route 4: generateSession with client_id")
+                        session_data = obj.generateSession(client_id=SMART_CLIENT_ID, password=SMART_PASSWORD, totp=current_totp)
+
+            if not session_data or 'access_token' not in session_data:
+                raise ValueError(f"All login routes failed. Response: {session_data}")
 
             obj.setAccessToken(session_data['access_token'])
             smart_api = obj
-            system_log.info("✅ SmartAPI fully initialized.")
+            system_log.info("✅ SmartAPI fully initialized and logged in!")
             return obj
 
         except Exception as e:
@@ -99,7 +105,7 @@ def init_smartapi():
             smart_api = None
             raise
 
-# Try to login at startup
+# Startup execution
 try:
     init_smartapi()
 except Exception as e:
@@ -147,11 +153,10 @@ def _fetch_from_smartapi(symbol):
         if cached:
             error_log.info(f"Using cached data for {symbol}")
             return cached
-        # Token expiry recovery
         if "Token missing" in str(e) or "AG8003" in str(e):
             system_log.warning("Token expired – re-login...")
             init_smartapi()
-            return _fetch_from_smartapi(symbol)  # retry once
+            return _fetch_from_smartapi(symbol)
         raise
 
 def fetch_live_data():
