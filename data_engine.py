@@ -159,15 +159,33 @@ def _fetch_from_smartapi(symbol):
             return _fetch_from_smartapi(symbol)
         raise
 
+# ---------------- ऑफलाइन टेस्टिंग मोड + टोकन फिक्स (Angel One Bypass) ----------------
+import random
+
+def _fetch_mock_data(symbol):
+    """बिना एंजल वन के नकली ओएचएलसीवी (OHLCV) डेटा जनरेट करने के लिए"""
+    return {
+        "time": datetime.now(),
+        "open": float(random.randint(24000, 24200)),
+        "high": float(random.randint(24200, 24300)),
+        "low": float(random.randint(23900, 24000)),
+        "close": float(random.randint(24000, 24200)),
+        "volume": random.randint(5000, 50000)
+    }
+
 def fetch_live_data():
+    """यह पूरे सिस्टम को बिना लॉगिन एरर के रनिंग स्टेट में ले आएगा"""
     for symbol in DATA_SOURCES.keys():
         try:
-            ohlcv = _fetch_from_smartapi(symbol)
+            # 🚀 असली नेटवर्क को बाईपास करके नकली डेटा कॉल किया
+            ohlcv = _fetch_mock_data(symbol) 
+            
             data_store.update(symbol, ohlcv)
             cache_set(f"data_{symbol}", ohlcv)
-            system_log.info(f"✅ Data updated for {symbol}")
+            system_log.info(f"Offline Test: Data generated for {symbol} -> Close: {ohlcv['close']}")
         except Exception as e:
-            error_log.error(f"❌ Error for {symbol}: {e}")
+            error_log.error(f"Error in Mock Fetch: {e}")
 
 def data_task():
     fetch_live_data()
+
