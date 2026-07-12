@@ -1,7 +1,6 @@
-flask
+smartapi-pythonnce
 gunicorn
 requests
-yfinance
 smartapi-python>=1.0.0
 logzero
 websocket-client
