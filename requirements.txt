@@ -4,9 +4,7 @@ requests
 smartapi-python>=1.0.0
 logzero
 websocket-client
-psutil
 pyotp
 python-telegram-bot
 schedule
 cachetools
-
