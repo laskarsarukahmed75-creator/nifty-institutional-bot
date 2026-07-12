@@ -1,6 +1,6 @@
 import time
 import os
-import psutil
+#import psutil
 import sqlite3
 import requests
 from config import HEALTH_INTERVAL, DB_PATH
