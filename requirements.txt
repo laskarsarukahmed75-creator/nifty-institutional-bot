@@ -1,3 +1,2 @@
-flask
-requests
-pyotp
+# No external dependencies required – uses Python standard library only.
+# Strictly requires Python 3.12 or above.
