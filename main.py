@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-nifty-institutional-bot – entry point with full error logging.
+nifty-institutional-bot – entry point with HTTP health check for Render.
 """
 import sys
 import os
@@ -13,6 +13,7 @@ import gc
 import traceback
 from datetime import datetime
 from queue import Queue
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import load_config
 from utils import (
@@ -67,7 +68,6 @@ class AppState:
 
 def startup_validation() -> bool:
     logging.info("Starting startup validation...")
-    # All checks are now non‑fatal; we log errors but continue.
     checks = [
         ("Python version", check_python_version()),
         ("SQLite version", check_sqlite_version()),
@@ -83,9 +83,28 @@ def startup_validation() -> bool:
             all_ok = False
         else:
             logging.info(f"{name}: OK")
-    # We continue even if some checks fail, because Render environments may have limitations.
     return True  # always proceed
 
+# ---- HTTP Health Check Handler ----
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+
+    def log_message(self, format, *args):
+        # Suppress HTTP logs to keep console clean
+        pass
+
+def start_health_server(port):
+    """Start a simple HTTP server on the given port."""
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    logging.info(f"Health check server running on port {port}")
+
+# ---- Main ----
 def main():
     setup_logging()
     logging.info("=== nifty-institutional-bot (hardened) starting ===")
@@ -97,7 +116,11 @@ def main():
     config = load_config()
     set_ist_offset()
 
-    startup_validation()  # no longer blocks
+    startup_validation()
+
+    # Start HTTP health check (Render requires a port)
+    port = int(os.environ.get('PORT', 8080))
+    start_health_server(port)
 
     # Create queues
     data_queue = Queue(maxsize=100)
