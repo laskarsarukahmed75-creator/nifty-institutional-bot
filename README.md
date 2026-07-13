@@ -1,25 +1,16 @@
-# Nifty Institutional Bot – Signal Board
+# nifty-institutional-bot
 
-## Overview
-A production‑grade signal intelligence platform that analyses Nifty and Bank Nifty using advanced market structure theories (Clone, Accumulation/Distribution, Liquidity, CHOCH, BOS). Generates 0–2 high‑confidence signals per day.
+Zero‑dependency, thread‑safe, memory‑efficient trading signal board for NIFTY 50, NIFTY BANK, and SENSEX.  
+Designed for resource‑constrained environments (Render Free Tier, Termux, Pydroid 3).
 
-## Features
-- Multi‑source data (Yahoo → Stooq → TwelveData → Cache)
-- 10‑layer signal validation pipeline
-- Dynamic confidence scoring (0–100)
-- Continuous health & validator monitoring
-- Watchdog with heartbeat for thread recovery
-- Aggregated storage (raw → 1min → 5min → auto‑delete)
-- Lightweight dashboard with engine health
-- Render Free Tier compatible
+## Core Features
+- Multi‑layered structural analysis (Clone Completion, Origin Mapping, Liquidity Sweeps).
+- 100-Point Weighted Decision Matrix.
+- Volatility-based adaptive polling (1s/5s/10s intervals).
+- 5-Minute Pre-Alert before 15‑min candle close.
+- SQLite WAL mode storage with 120-day automated pruning.
+- Supervisor Watchdog for automatic thread recovery.
 
-## Deployment on Render
-1. Push to GitHub.
-2. Create Web Service on Render.
-3. Set environment variables (PORT, DB_PATH, TWELVE_API_KEY optional).
-4. Build: `pip install -r requirements.txt`
-5. Start: `python main.py`
-
-## Dashboard
-Access your Render URL to see live signals and health status.
-API endpoints: `/api/signal`, `/api/structure`, `/api/health`
+## Quick Start
+```bash
+python main.py
