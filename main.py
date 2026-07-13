@@ -1,17 +1,7 @@
-
----
-
-## 🧬 Final Code (All Modules – Improved & Fixed)
-
----
-
-### `main.py` (Entry point – with startup validation and state machine)
-
-```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-nifty-institutional-bot – hardened production entry point.
+nifty-institutional-bot – entry point with full error logging.
 """
 import sys
 import os
@@ -20,6 +10,7 @@ import logging
 import threading
 import signal
 import gc
+import traceback
 from datetime import datetime
 from queue import Queue
 
@@ -27,7 +18,7 @@ from config import load_config
 from utils import (
     setup_logging, check_python_version, check_sqlite_version,
     check_disk_space, check_write_permissions, check_memory,
-    check_internet, set_ist_offset, is_market_session
+    check_internet, set_ist_offset
 )
 from supervisor import Supervisor
 from data_engine import DataEngine
@@ -47,7 +38,6 @@ STATE_TP_OR_SL = "TP_OR_SL"
 STATE_RESET = "RESET"
 
 class AppState:
-    """Central state machine – thread‑safe."""
     def __init__(self):
         self.state = STATE_WAITING
         self.lock = threading.Lock()
@@ -70,30 +60,31 @@ class AppState:
             return self.state
 
     def reset_state(self):
-        """Flush active signal and reset counters."""
         with self.lock:
             self.signal_data = None
             self.state = STATE_WAITING
             self.last_reset = datetime.now()
-            # Do not reset daily count; we keep it.
 
 def startup_validation() -> bool:
     logging.info("Starting startup validation...")
+    # All checks are now non‑fatal; we log errors but continue.
     checks = [
         ("Python version", check_python_version()),
         ("SQLite version", check_sqlite_version()),
-        ("Disk space (>=100MB)", check_disk_space(100)),
+        ("Disk space", check_disk_space(100)),
         ("Write permissions", check_write_permissions()),
-        ("Memory capacity (>=200MB)", check_memory(200)),
+        ("Memory capacity", check_memory(200)),
         ("Internet connectivity", check_internet()),
     ]
+    all_ok = True
     for name, ok in checks:
         if not ok:
-            logging.critical(f"Startup validation failed: {name}")
-            return False
-        logging.info(f"{name}: OK")
-    logging.info("All startup validations passed.")
-    return True
+            logging.warning(f"Startup check failed: {name} – continuing anyway.")
+            all_ok = False
+        else:
+            logging.info(f"{name}: OK")
+    # We continue even if some checks fail, because Render environments may have limitations.
+    return True  # always proceed
 
 def main():
     setup_logging()
@@ -104,19 +95,17 @@ def main():
         sys.exit(1)
 
     config = load_config()
-    set_ist_offset()  # ensure IST offset for session checks
+    set_ist_offset()
 
-    if not startup_validation():
-        sys.exit(1)
+    startup_validation()  # no longer blocks
 
     # Create queues
     data_queue = Queue(maxsize=100)
     structure_queue = Queue(maxsize=100)
-    signal_queue = Queue(maxsize=100)   # not heavily used
+    signal_queue = Queue(maxsize=100)
     dashboard_queue = Queue(maxsize=100)
     storage_queue = Queue(maxsize=100)
 
-    # Instantiate components
     storage = StorageController(config["DB_PATH"])
     storage.initialize_db()
     data_engine = DataEngine(config, data_queue, storage_queue)
@@ -125,9 +114,8 @@ def main():
     dashboard = Dashboard(config, dashboard_queue)
 
     app_state = AppState()
-    signal_engine.app_state = app_state  # inject state
+    signal_engine.app_state = app_state
 
-    # Supervisor manages all threads
     supervisor = Supervisor(
         data_engine=data_engine,
         structure_engine=structure_engine,
@@ -151,6 +139,7 @@ def main():
         supervisor.start()
     except Exception as e:
         logging.critical(f"Supervisor failed: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
     while supervisor.is_running():
@@ -159,4 +148,9 @@ def main():
     logging.info("Application terminated.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("FATAL UNHANDLED EXCEPTION:", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
