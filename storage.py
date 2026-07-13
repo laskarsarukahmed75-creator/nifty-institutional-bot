@@ -1,205 +1,193 @@
 import sqlite3
-import json
 import threading
+import logging
 import time
 import os
-from datetime import datetime, timedelta
-from config import DB_PATH, WAL_MODE, RAW_RETENTION_DAYS, MINUTE_RETENTION_DAYS, FIVE_MIN_RETENTION_DAYS
-from logger_setup import database_log, error_log
+import json
+from queue import Queue, Empty
+from typing import Dict
 
-class Storage:
-    _instance = None
-    _lock = threading.Lock()
+class StorageController(threading.Thread):
+    def __init__(self, db_path: str):
+        super().__init__(daemon=True)
+        self.db_path = db_path
+        self.running = False
+        self.queue = Queue(maxsize=100)
+        self.last_prune = time.time()
+        self.last_vacuum = time.time()
+        self.prune_interval = 86400
+        self.vacuum_interval = 604800
+        self.prune_days = 120
+        self.conn = None
+        self.lock = threading.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
+    def initialize_db(self):
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT, start_time INTEGER, open REAL, high REAL,
+                low REAL, close REAL, volume REAL, timestamp REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS structures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT, candle_id INTEGER, score REAL,
+                structure_json TEXT, timestamp REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT UNIQUE, asset TEXT, direction TEXT,
+                entry REAL, sl REAL, tp REAL, rr REAL, win_prob REAL,
+                score REAL, timestamp REAL, signal_json TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT, data_json TEXT, timestamp REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pre_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT, timestamp REAL, score REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT, message TEXT, timestamp REAL
+            )
+        """)
+        conn.commit()
+        conn.close()
+        logging.info("Database initialised.")
 
-    def __init__(self):
-        if hasattr(self, '_initialized'):
-            return
-        self.db_path = DB_PATH
-        self._ensure_dir()
-        self._init_db()
-        self._start_cleaner()
-        self._initialized = True
+    def run(self):
+        self.running = True
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        logging.info("Storage thread started.")
+        while self.running:
+            try:
+                item = self.queue.get(timeout=0.5)
+            except Empty:
+                self._maybe_prune()
+                continue
+            if item is None:
+                continue
+            self._process(item)
+        self.conn.close()
+        logging.info("Storage stopped.")
 
-    def _ensure_dir(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    def stop(self):
+        self.running = False
 
-    def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
-        conn.execute("PRAGMA busy_timeout=30000")
-        if WAL_MODE:
-            conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+    def _process(self, item):
+        typ, data = item
+        try:
+            if typ == "candle":
+                self._insert_candle(data)
+            elif typ == "structure":
+                self._insert_structure(data)
+            elif typ == "signal":
+                self._insert_signal(data)
+            elif typ == "raw_data":
+                self._insert_raw(data)
+            elif typ == "pre_alert":
+                self._insert_pre_alert(data)
+            else:
+                logging.warning(f"Unknown storage type: {typ}")
+        except Exception as e:
+            logging.error(f"Storage insert error: {e}")
 
-    def _init_db(self):
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            # raw_data
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS raw_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    open REAL, high REAL, low REAL, close REAL, volume INTEGER
-                )
-            """)
-            # minute_data with unique constraint
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS minute_data (
-                    symbol TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    open REAL, high REAL, low REAL, close REAL, volume INTEGER,
-                    PRIMARY KEY (symbol, timestamp)
-                )
-            """)
-            # five_minute_data with unique constraint
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS five_minute_data (
-                    symbol TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    open REAL, high REAL, low REAL, close REAL, volume INTEGER,
-                    PRIMARY KEY (symbol, timestamp)
-                )
-            """)
-            # signals
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    entry REAL, sl REAL, tp REAL, rr REAL,
-                    confidence REAL,
-                    reason TEXT,
-                    layers TEXT,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            # structures
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS structures (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    json TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            # Indexes
-            for table in ["raw_data", "minute_data", "five_minute_data"]:
-                c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_symbol ON {table}(symbol)")
-                c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_time ON {table}(timestamp)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_signals_time ON signals(timestamp)")
-            conn.commit()
+    def _insert_candle(self, candle):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """INSERT INTO candles
+                   (asset, start_time, open, high, low, close, volume, timestamp)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (candle["asset"], candle["start_time"], candle["open"], candle["high"],
+                 candle["low"], candle["close"], candle["volume"], candle.get("timestamp", time.time()))
+            )
+            self.conn.commit()
 
-    def save_raw(self, symbol, ohlcv):
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO raw_data (symbol, timestamp, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, ohlcv["time"].isoformat(), ohlcv["open"], ohlcv["high"],
-                  ohlcv["low"], ohlcv["close"], ohlcv["volume"]))
-            conn.commit()
+    def _insert_structure(self, structure):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "INSERT INTO structures (asset, candle_id, score, structure_json, timestamp) VALUES (?,?,?,?,?)",
+                (structure.get("asset"), structure.get("candle_id", 0), structure.get("score", 0),
+                 json.dumps(structure), time.time())
+            )
+            self.conn.commit()
 
-    def save_signal(self, symbol, signal):
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO signals (symbol, direction, entry, sl, tp, rr, confidence, reason, layers, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, signal.direction, signal.entry, signal.sl, signal.tp,
-                  signal.rr, signal.confidence, signal.reason, json.dumps(signal.layers),
-                  signal.timestamp.isoformat()))
-            conn.commit()
+    def _insert_signal(self, signal):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """INSERT OR REPLACE INTO signals
+                   (trade_id, asset, direction, entry, sl, tp, rr, win_prob, score, timestamp, signal_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (signal["trade_id"], signal["asset"], signal["direction"], signal["entry"],
+                 signal["sl"], signal["tp"], signal["rr"], signal["win_prob"], signal["score"],
+                 time.time(), json.dumps(signal))
+            )
+            self.conn.commit()
 
-    def save_structure(self, symbol, structure):
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO structures (symbol, json, timestamp)
-                VALUES (?, ?, ?)
-            """, (symbol, json.dumps(structure.to_dict()), datetime.now().isoformat()))
-            conn.commit()
+    def _insert_raw(self, data):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "INSERT INTO raw_data (asset, data_json, timestamp) VALUES (?,?,?)",
+                (data.get("asset"), json.dumps(data), time.time())
+            )
+            self.conn.commit()
 
-    def _aggregate_minutes(self):
-        cutoff = (datetime.now() - timedelta(days=RAW_RETENTION_DAYS)).isoformat()
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            # Use CTE to compute aggregates with proper open/close
-            c.execute("""
-                WITH grouped AS (
-                    SELECT
-                        symbol,
-                        strftime('%Y-%m-%dT%H:%M:00', timestamp) AS ts,
-                        FIRST_VALUE(open) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp) ORDER BY timestamp) AS open,
-                        MAX(high) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS high,
-                        MIN(low) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS low,
-                        FIRST_VALUE(close) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp) ORDER BY timestamp DESC) AS close,
-                        SUM(volume) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS volume
-                    FROM raw_data
-                    WHERE timestamp < ?
-                )
-                INSERT OR REPLACE INTO minute_data (symbol, timestamp, open, high, low, close, volume)
-                SELECT DISTINCT symbol, ts, open, high, low, close, volume
-                FROM grouped
-                WHERE ts IS NOT NULL
-            """, (cutoff,))
-            conn.commit()
-            c.execute("DELETE FROM raw_data WHERE timestamp < ?", (cutoff,))
-            conn.commit()
+    def _insert_pre_alert(self, alert):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "INSERT INTO pre_alerts (asset, timestamp, score) VALUES (?,?,?)",
+                (alert["asset"], alert["time"], alert["score"])
+            )
+            self.conn.commit()
 
-    def _aggregate_five_minutes(self):
-        cutoff = (datetime.now() - timedelta(days=MINUTE_RETENTION_DAYS)).isoformat()
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            c.execute("""
-                WITH grouped AS (
-                    SELECT
-                        symbol,
-                        strftime('%Y-%m-%dT%H:%M:00', timestamp) AS ts,
-                        FIRST_VALUE(open) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp) ORDER BY timestamp) AS open,
-                        MAX(high) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS high,
-                        MIN(low) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS low,
-                        FIRST_VALUE(close) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp) ORDER BY timestamp DESC) AS close,
-                        SUM(volume) OVER (PARTITION BY symbol, strftime('%Y-%m-%dT%H:%M:00', timestamp)) AS volume
-                    FROM minute_data
-                    WHERE timestamp < ?
-                )
-                INSERT OR REPLACE INTO five_minute_data (symbol, timestamp, open, high, low, close, volume)
-                SELECT DISTINCT symbol, ts, open, high, low, close, volume
-                FROM grouped
-                WHERE ts IS NOT NULL
-            """, (cutoff,))
-            conn.commit()
-            c.execute("DELETE FROM minute_data WHERE timestamp < ?", (cutoff,))
-            conn.commit()
+    def _maybe_prune(self):
+        now = time.time()
+        if now - self.last_prune >= self.prune_interval:
+            self._prune_old()
+            self.last_prune = now
+        if now - self.last_vacuum >= self.vacuum_interval:
+            self._vacuum()
+            self.last_vacuum = now
 
-    def _clean_old_data(self):
-        cutoff = (datetime.now() - timedelta(days=FIVE_MIN_RETENTION_DAYS)).isoformat()
-        with self._get_conn() as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM five_minute_data WHERE timestamp < ?", (cutoff,))
-            c.execute("DELETE FROM signals WHERE timestamp < ?", (cutoff,))
-            c.execute("DELETE FROM structures WHERE timestamp < ?", (cutoff,))
-            conn.commit()
+    def _prune_old(self):
+        cutoff = time.time() - (self.prune_days * 86400)
+        logging.info(f"Pruning data older than {self.prune_days} days")
+        tables = ["candles", "structures", "raw_data", "pre_alerts", "logs"]
+        with self.lock:
+            cur = self.conn.cursor()
+            for table in tables:
+                deleted = 1
+                while deleted > 0:
+                    cur.execute(f"DELETE FROM {table} WHERE timestamp < ? LIMIT 5000", (cutoff,))
+                    deleted = cur.rowcount
+                    self.conn.commit()
+                    if deleted:
+                        logging.debug(f"Pruned {deleted} rows from {table}")
+            self.conn.commit()
 
-    def _cleanup_task(self):
-        self._aggregate_minutes()
-        self._aggregate_five_minutes()
-        self._clean_old_data()
-
-    def _start_cleaner(self):
-        def cleaner_loop():
-            while True:
-                now = datetime.now()
-                next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                sleep_seconds = (next_run - now).total_seconds()
-                time.sleep(sleep_seconds)
-                self._cleanup_task()
-        threading.Thread(target=cleaner_loop, daemon=True).start()
+    def _vacuum(self):
+        logging.info("Running VACUUM...")
+        with self.lock:
+            self.conn.execute("VACUUM")
+            self.conn.commit()
