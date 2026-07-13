@@ -1,169 +1,195 @@
+import time
+import threading
 import logging
+import math
+from queue import Queue, Empty
+from typing import Dict, List, Optional
 from collections import deque
-from datetime import datetime
-from cache import cache_get, cache_set
-from logger_setup import system_log, error_log
 
-class Structure:
-    def __init__(self):
-        self.origin = None
-        self.clone_complete = False
-        self.clone_length = 0.0
-        self.clone_ratio = 0.0
-        self.lock_point = None
-        self.accumulation = False
-        self.manipulation = False
-        self.distribution = False
-        self.trend = "NEUTRAL"
-        self.confidence = 0.0
-        self.swings = []
-        self.recent_high = None
-        self.recent_low = None
-        self.liquidity_sweep = False
-        self.cho = False
-        self.bos = False
+from utils import safe_divide
 
-    def to_dict(self):
-        return {
-            "origin": self.origin,
-            "clone_complete": self.clone_complete,
-            "clone_length": self.clone_length,
-            "clone_ratio": self.clone_ratio,
-            "lock_point": self.lock_point,
-            "accumulation": self.accumulation,
-            "manipulation": self.manipulation,
-            "distribution": self.distribution,
-            "trend": self.trend,
-            "confidence": self.confidence,
-            "recent_high": self.recent_high,
-            "recent_low": self.recent_low,
-            "liquidity_sweep": self.liquidity_sweep,
-            "cho": self.cho,
-            "bos": self.bos,
+class StructureEngine(threading.Thread):
+    def __init__(self, config, data_queue: Queue, out_queue: Queue, storage_queue: Queue):
+        super().__init__(daemon=True)
+        self.config = config
+        self.data_queue = data_queue
+        self.out_queue = out_queue
+        self.storage_queue = storage_queue
+        self.running = False
+        self.candle_window = 15 * 60
+        self.current_candle = None
+        self.asset_candles = {}       # asset -> list of completed candles
+        self.atr_period = 14
+        self.atr_values = {}          # asset -> deque of true ranges
+        self.structure_cache = {}
+
+        # Weights (from config)
+        self.w = {
+            "clone": config["WEIGHT_CLONE_COMPLETION"] / 100.0,
+            "origin": config["WEIGHT_ORIGIN_MAPPING"] / 100.0,
+            "liquidity": config["WEIGHT_LIQUIDITY_SWEEPS"] / 100.0,
+            "structure": config["WEIGHT_STRUCTURE_ALIGNMENT"] / 100.0,
+            "trap": config["WEIGHT_TRAP_FILTER"] / 100.0,
+            "premium": config["WEIGHT_PREMIUM_DISCOUNT"] / 100.0,
         }
 
-class StructureEngine:
-    def __init__(self, data_store):
-        self.data_store = data_store
-        self.structure = Structure()
-        self.history = {}
+    def run(self):
+        self.running = True
+        logging.info("StructureEngine started.")
+        while self.running:
+            try:
+                item = self.data_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            if item is None:
+                continue
+            self._process_raw(item)
+        logging.info("StructureEngine stopped.")
 
-    def _compute_atr(self, highs, lows, closes, period=14):
-        if len(closes) < period + 1:
-            return 0.0
-        tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-              for i in range(1, len(closes))]
-        if len(tr) < period:
-            return 0.0
-        return sum(tr[-period:]) / period
+    def stop(self):
+        self.running = False
 
-    def update(self, symbol: str):
-        ohlcv = self.data_store.get(symbol)
-        if not ohlcv or ohlcv["time"] is None:
+    def _process_raw(self, data: Dict):
+        asset = data.get("asset")
+        price = data.get("close")
+        if asset is None or price is None:
             return
+        ts = data.get("timestamp", time.time())
+        boundary = int(ts // self.candle_window) * self.candle_window
 
-        if symbol not in self.history:
-            self.history[symbol] = deque(maxlen=200)
-        self.history[symbol].append(ohlcv)
-        if len(self.history[symbol]) < 20:
-            return
-
-        closes = [c["close"] for c in self.history[symbol]]
-        highs = [c["high"] for c in self.history[symbol]]
-        lows = [c["low"] for c in self.history[symbol]]
-
-        # ATR for noise filter
-        atr = self._compute_atr(highs, lows, closes, period=14)
-        min_swing_amplitude = atr * 0.5 if atr > 0 else 5.0  # fallback if no ATR
-
-        # Detect swing points with improved logic: look for pivot with 3-bar confirmation
-        swing_highs = []
-        swing_lows = []
-        n = len(highs)
-        for i in range(3, n-3):
-            # High pivot: high[i] is greater than previous 3 and next 3
-            if all(highs[i] > highs[i-j] for j in range(1, 4)) and all(highs[i] > highs[i+j] for j in range(1, 4)):
-                # Check amplitude
-                if highs[i] - min(highs[i-3:i+4]) >= min_swing_amplitude:
-                    swing_highs.append((highs[i], i))
-            # Low pivot: low[i] is lower than previous 3 and next 3
-            if all(lows[i] < lows[i-j] for j in range(1, 4)) and all(lows[i] < lows[i+j] for j in range(1, 4)):
-                if max(lows[i-3:i+4]) - lows[i] >= min_swing_amplitude:
-                    swing_lows.append((lows[i], i))
-
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return
-
-        struct = Structure()
-        last_high = swing_highs[-1]
-        last_low = swing_lows[-1]
-        struct.recent_high = last_high[0]
-        struct.recent_low = last_low[0]
-
-        if last_high[1] > last_low[1]:
-            struct.trend = "UP"
+        if self.current_candle is None or self.current_candle["asset"] != asset or self.current_candle["start_time"] != boundary:
+            if self.current_candle is not None:
+                self._close_candle(self.current_candle)
+            self.current_candle = {
+                "asset": asset,
+                "start_time": boundary,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": data.get("volume", 0),
+                "trades": 1
+            }
         else:
-            struct.trend = "DOWN"
+            c = self.current_candle
+            c["high"] = max(c["high"], price)
+            c["low"] = min(c["low"], price)
+            c["close"] = price
+            c["volume"] += data.get("volume", 0)
+            c["trades"] += 1
 
-        if len(swing_highs) >= 3:
-            h1 = swing_highs[-2]
-            h2 = swing_highs[-1]
-            clone_len = abs(h2[0] - h1[0])
-            struct.clone_length = clone_len
-            if len(swing_highs) >= 4:
-                prev_len = abs(swing_highs[-3][0] - swing_highs[-2][0])
-                struct.clone_ratio = clone_len / prev_len if prev_len > 0 else 1.0
-            else:
-                struct.clone_ratio = 1.0
-            if struct.trend == "UP":
-                target = h1[0] + clone_len
-                struct.clone_complete = h2[0] >= target
-            else:
-                target = h1[0] - clone_len
-                struct.clone_complete = h2[0] <= target
+    def _close_candle(self, candle: Dict):
+        asset = candle["asset"]
+        if asset not in self.asset_candles:
+            self.asset_candles[asset] = []
+        self.asset_candles[asset].append(candle)
+        if len(self.asset_candles[asset]) > 500:
+            self.asset_candles[asset] = self.asset_candles[asset][-500:]
 
-        struct.lock_point = last_high[0] if struct.trend == "UP" else last_low[0]
+        self._update_atr(asset, candle)
+        structure = self._compute_structure(asset, candle)
+        if structure:
+            self.out_queue.put({
+                "asset": asset,
+                "candle": candle,
+                "structure": structure,
+                "score": structure.get("score", 0),
+                "timestamp": time.time()
+            })
+            self.storage_queue.put(("candle", candle))
+            self.storage_queue.put(("structure", structure))
 
-        recent_range = max(highs[-10:]) - min(lows[-10:])
-        avg_range = sum(highs[-i] - lows[-i] for i in range(1, 11)) / 10
-        if recent_range < avg_range * 0.7:
-            if struct.trend == "UP":
-                struct.accumulation = True
-            else:
-                struct.distribution = True
+    def _update_atr(self, asset: str, candle: Dict):
+        if asset not in self.atr_values:
+            self.atr_values[asset] = deque(maxlen=self.atr_period)
+        history = self.asset_candles[asset]
+        if len(history) >= 2:
+            prev = history[-2]
+            tr = max(candle["high"] - candle["low"],
+                     abs(candle["high"] - prev["close"]),
+                     abs(candle["low"] - prev["close"]))
+        else:
+            tr = candle["high"] - candle["low"]
+        self.atr_values[asset].append(tr)
 
-        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-            if struct.trend == "UP" and swing_highs[-1][0] > swing_highs[-2][0]:
-                if closes[-1] < swing_highs[-1][0]:
-                    struct.manipulation = True
+    def get_atr(self, asset: str) -> float:
+        vals = self.atr_values.get(asset)
+        if not vals:
+            return 0.0
+        return sum(vals) / len(vals)
 
-        if len(swing_highs) >= 3:
-            if struct.trend == "UP":
-                if highs[-1] > swing_highs[-2][0] and closes[-1] < swing_highs[-2][0]:
-                    struct.liquidity_sweep = True
-            else:
-                if lows[-1] < swing_lows[-2][0] and closes[-1] > swing_lows[-2][0]:
-                    struct.liquidity_sweep = True
+    def _compute_structure(self, asset: str, candle: Dict) -> Dict:
+        atr = self.get_atr(asset)
+        history = self.asset_candles.get(asset, [])
+        if len(history) < 20:
+            return {"score": 0, "ready": False}
 
-        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-            if struct.trend == "UP":
-                if lows[-1] < swing_lows[-1][0]:
-                    struct.cho = True
-            else:
-                if highs[-1] > swing_highs[-1][0]:
-                    struct.cho = True
+        # Simple support/resistance from recent pivots (simplified)
+        recent = history[-20:]
+        highs = [c["high"] for c in recent]
+        lows = [c["low"] for c in recent]
+        closes = [c["close"] for c in recent]
+        recent_high = max(highs)
+        recent_low = min(lows)
+        avg_volume = sum(c["volume"] for c in recent) / len(recent) + 1e-9
+        close = candle["close"]
+        volume = candle["volume"]
 
-        if len(swing_highs) >= 3:
-            if struct.trend == "UP":
-                if highs[-1] > swing_highs[-2][0]:
-                    struct.bos = True
-            else:
-                if lows[-1] < swing_lows[-2][0]:
-                    struct.bos = True
+        # Pattern detection (simplified but deterministic)
+        range_mid = (recent_high + recent_low) / 2
+        accumulation = close < range_mid and volume > 1.2 * avg_volume
+        distribution = close > range_mid and volume > 1.2 * avg_volume
+        origin_shift = close > recent_high or close < recent_low
+        origin_confirm = close > recent_high   # for buy
+        clone_complete = True  # placeholder
+        structure_confirm = True
+        manipulation_phase = False
+        structure_mismatch = False
+        clone_ratio_variance = False
 
-        struct.swings = (swing_highs, swing_lows)
-        self.structure = struct
-        cache_set(f"structure_{symbol}", struct)
+        # Risk reward
+        entry = close
+        sl = recent_low if close > recent_low else recent_high
+        tp = recent_high if close > recent_low else recent_low
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        rr = safe_divide(reward, risk, default=0.0)
+        rr_ok = rr >= self.config["MIN_RISK_REWARD"]
 
-    def get_structure(self, symbol: str) -> Structure:
-        return self.structure
+        # Weighted scoring (each component contributes up to its weight * 100)
+        score = 0.0
+        score += self.w["clone"] * 100 if clone_complete else 0
+        score += self.w["origin"] * 100 if origin_shift else 0
+        score += self.w["liquidity"] * 100 if (accumulation or distribution) else 0
+        score += self.w["structure"] * 100 if structure_confirm else 0
+        score += self.w["trap"] * 100 if not manipulation_phase else 0
+        score += self.w["premium"] * 100 if (not structure_mismatch and not clone_ratio_variance) else 0
+        score = clamp(score, 0, 100)
+
+        return {
+            "score": score,
+            "clone_complete": clone_complete,
+            "origin_shift": origin_shift,
+            "accumulation_confirm": accumulation,
+            "distribution_confirm": distribution,
+            "origin_confirm": origin_confirm,
+            "structure_confirm": structure_confirm,
+            "manipulation_phase": manipulation_phase,
+            "structure_mismatch": structure_mismatch,
+            "clone_ratio_variance": clone_ratio_variance,
+            "risk_reward": rr,
+            "risk_reward_ok": rr_ok,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "entry_zone": f"{recent_low:.2f}-{range_mid:.2f}",
+            "exit_zone": f"{range_mid:.2f}-{recent_high:.2f}",
+            "supports": [recent_low],
+            "resistances": [recent_high],
+            "atr": atr,
+            "ready": score >= 70
+        }
+
+    @staticmethod
+    def clamp(val, minv, maxv):
+        return max(minv, min(val, maxv))
