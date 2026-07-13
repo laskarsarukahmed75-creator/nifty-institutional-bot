@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-nifty-institutional-bot – entry point with HTTP health check for Render.
+nifty-institutional-bot – entry point with robust HTTP health check for Render.
 """
 import sys
 import os
@@ -83,15 +83,16 @@ def startup_validation() -> bool:
             all_ok = False
         else:
             logging.info(f"{name}: OK")
-    return True  # always proceed
+    return True
 
 # ---- HTTP Health Check Handler ----
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Send a simple response
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'OK')
+        self.wfile.write(b'OK - nifty-institutional-bot running')
 
     def log_message(self, format, *args):
         # Suppress HTTP logs to keep console clean
@@ -99,10 +100,17 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def start_health_server(port):
     """Start a simple HTTP server on the given port."""
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    logging.info(f"Health check server running on port {port}")
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        # Run in a daemon thread so it doesn't block the main process
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        logging.info(f"✅ Health check server running on port {port}")
+        return server
+    except Exception as e:
+        logging.error(f"❌ Failed to start health server on port {port}: {e}")
+        # Re-raise to abort if port binding fails – Render requires it.
+        raise
 
 # ---- Main ----
 def main():
@@ -120,7 +128,10 @@ def main():
 
     # Start HTTP health check (Render requires a port)
     port = int(os.environ.get('PORT', 8080))
+    logging.info(f"Attempting to bind to port {port}...")
     start_health_server(port)
+    # Give the server a moment to start
+    time.sleep(0.5)
 
     # Create queues
     data_queue = Queue(maxsize=100)
