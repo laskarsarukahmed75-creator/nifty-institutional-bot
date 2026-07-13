@@ -1,147 +1,131 @@
-from datetime import datetime, timedelta
-from typing import Optional
-from config import MIN_RISK_REWARD, MAX_SL_BUFFER, SIGNAL_COOLDOWN, SCORE_WEIGHTS
-from logger_setup import signal_log, error_log
-import hashlib
-import json
+import time
+import threading
+import logging
+from queue import Queue, Empty
+from typing import Dict
+from datetime import datetime
 
-class Signal:
-    def __init__(self, direction, entry, sl, tp, rr, confidence, reason=""):
-        self.direction = direction
-        self.entry = entry
-        self.sl = sl
-        self.tp = tp
-        self.rr = rr
-        self.confidence = confidence
-        self.reason = reason
-        self.timestamp = datetime.now()
-        self.layers = []
+from utils import safe_divide
 
-    def to_dict(self):
-        return {
-            "direction": self.direction,
-            "entry": self.entry,
-            "sl": self.sl,
-            "tp": self.tp,
-            "rr": self.rr,
-            "confidence": self.confidence,
-            "reason": self.reason,
-            "timestamp": self.timestamp.isoformat(),
-            "layers": self.layers
-        }
+class SignalEngine(threading.Thread):
+    def __init__(self, config, in_queue: Queue, out_queue: Queue, storage_queue: Queue, dashboard_queue: Queue):
+        super().__init__(daemon=True)
+        self.config = config
+        self.in_queue = in_queue
+        self.out_queue = out_queue
+        self.storage_queue = storage_queue
+        self.dashboard_queue = dashboard_queue
+        self.running = False
+        self.app_state = None
+        self.last_pre_alert = {}   # asset -> last pre-alert timestamp
+        self.processed_candles = set()
 
-class SignalEngine:
-    def __init__(self, structure_engine):
-        self.structure_engine = structure_engine
-        self.last_signal = None
-        self.last_signal_time = None
-        self._duplicate_cache = {}   # hash_key -> timestamp
+    def run(self):
+        self.running = True
+        logging.info("SignalEngine started.")
+        while self.running:
+            try:
+                item = self.in_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            if item is None:
+                continue
+            self._process_structure(item)
+        logging.info("SignalEngine stopped.")
 
-    def _clean_duplicate_cache(self):
-        now = datetime.now()
-        expired = [k for k, ts in self._duplicate_cache.items() if (now - ts).total_seconds() > 600]  # 10 min TTL
-        for k in expired:
-            del self._duplicate_cache[k]
+    def stop(self):
+        self.running = False
 
-    def _compute_signal_hash(self, symbol, direction, entry, struct):
-        # Create a unique fingerprint of the signal context
-        data = {
-            "symbol": symbol,
-            "direction": direction,
-            "entry": round(entry, 2),
-            "trend": struct.trend,
-            "bos": struct.bos,
-            "cho": struct.cho,
-            "clone_ratio": round(struct.clone_ratio, 3),
-            "lock_point": round(struct.lock_point, 2) if struct.lock_point else None,
-        }
-        json_str = json.dumps(data, sort_keys=True)
-        return hashlib.md5(json_str.encode()).hexdigest()
+    def _process_structure(self, struct_data: Dict):
+        asset = struct_data.get("asset")
+        candle = struct_data.get("candle")
+        structure = struct_data.get("structure")
+        if not asset or not candle or not structure:
+            return
 
-    def _score_confidence(self, struct, ohlcv):
-        score = 0
-        if struct.clone_complete:
-            score += SCORE_WEIGHTS["clone_accuracy"]
-        elif struct.clone_ratio > 0.8:
-            score += SCORE_WEIGHTS["clone_accuracy"] * 0.5
-        if struct.trend != "NEUTRAL":
-            score += SCORE_WEIGHTS["trend_quality"]
-        if ohlcv and ohlcv.get("volume", 0) > 100000:
-            score += SCORE_WEIGHTS["volume_quality"]
-        if not struct.manipulation:
-            score += SCORE_WEIGHTS["structure_quality"] * 0.7
-        if struct.accumulation or struct.distribution:
-            score += SCORE_WEIGHTS["structure_quality"] * 0.3
-        if struct.liquidity_sweep:
-            score += SCORE_WEIGHTS["liquidity_quality"]
-        score += SCORE_WEIGHTS["market_session"]
-        if 0.9 <= struct.clone_ratio <= 1.1:
-            score += SCORE_WEIGHTS["historical_similarity"]
-        return min(100, score)
+        # Daily signal limit
+        today = datetime.now().date()
+        if self.app_state:
+            if self.app_state.last_signal_date != today:
+                self.app_state.signal_count_today = 0
+                self.app_state.last_signal_date = today
+            if self.app_state.signal_count_today >= self.config["MAX_SIGNALS_PER_DAY"]:
+                logging.debug(f"Daily max reached for {asset}")
+                return
 
-    def generate_signal(self, symbol: str) -> Optional[Signal]:
-        self._clean_duplicate_cache()
+        # Pre-alert: if 5-6 minutes before candle close
+        now = time.time()
+        close_time = candle["start_time"] + 15 * 60
+        time_to_close = close_time - now
+        if 300 <= time_to_close <= 360:
+            score = structure.get("score", 0)
+            if score >= 70:
+                msg = f"🚨 PRE-SIGNAL ALERT: Potential High-Probability Setup forming on {asset} within 5 minutes."
+                logging.info(msg)
+                self.dashboard_queue.put({"type": "pre_alert", "asset": asset, "message": msg, "score": score})
+                self.storage_queue.put(("pre_alert", {"asset": asset, "time": now, "score": score}))
 
-        struct = self.structure_engine.get_structure(symbol)
-        ohlcv = self.structure_engine.data_store.get(symbol)
+        # Avoid duplicate processing
+        key = f"{asset}_{candle['start_time']}"
+        if key in self.processed_candles:
+            return
+        self.processed_candles.add(key)
 
-        if self.last_signal_time:
-            elapsed = (datetime.now() - self.last_signal_time).total_seconds()
-            if elapsed < SIGNAL_COOLDOWN:
-                return None
+        score = structure.get("score", 0)
+        if score < 70:
+            return
 
-        if struct.trend == "NEUTRAL":
-            return None
-        if not (struct.accumulation or struct.distribution):
-            return None
-        if not struct.clone_complete:
-            return None
-        if not struct.liquidity_sweep:
-            return None
-        if not struct.cho:
-            return None
-        if not struct.bos:
-            return None
-        if not ohlcv or ohlcv.get("volume", 0) < 100000:
-            return None
+        # Conditional triggers
+        clone_complete = structure.get("clone_complete", False)
+        accumulation = structure.get("accumulation_confirm", False)
+        distribution = structure.get("distribution_confirm", False)
+        origin_shift = structure.get("origin_shift", False)
+        origin_confirm = structure.get("origin_confirm", False)
+        structure_confirm = structure.get("structure_confirm", False)
+        manipulation = structure.get("manipulation_phase", False)
+        mismatch = structure.get("structure_mismatch", False)
+        clone_ratio_var = structure.get("clone_ratio_variance", False)
+        rr_ok = structure.get("risk_reward_ok", False)
 
-        direction = "BUY" if struct.trend == "UP" else "SELL"
-        entry = ohlcv["close"]
-        if direction == "BUY":
-            sl = struct.recent_low - MAX_SL_BUFFER
-            tp = entry + struct.clone_length * struct.clone_ratio
-        else:
-            sl = struct.recent_high + MAX_SL_BUFFER
-            tp = entry - struct.clone_length * struct.clone_ratio
+        no_trade = manipulation or mismatch or clone_ratio_var or not rr_ok
+        if no_trade:
+            return
 
-        risk = abs(entry - sl)
-        reward = abs(tp - entry)
-        if risk == 0:
-            return None
-        rr = reward / risk
-        if rr < MIN_RISK_REWARD:
-            return None
+        direction = None
+        if clone_complete and accumulation and origin_shift:
+            direction = "BUY"
+        elif clone_complete and distribution and origin_confirm and structure_confirm:
+            direction = "SELL"
 
-        confidence = self._score_confidence(struct, ohlcv)
-        if confidence < 70:
-            return None
+        if direction:
+            signal = {
+                "trade_id": f"{asset[:3]}{int(time.time()) % 1000000}",
+                "asset": asset,
+                "direction": direction,
+                "entry": structure.get("entry", 0),
+                "sl": structure.get("sl", 0),
+                "tp": structure.get("tp", 0),
+                "rr": structure.get("risk_reward", 0),
+                "win_prob": clamp(60 + (score - 70) * 0.5, 50, 95),
+                "score": score,
+                "strength": "High" if score >= 85 else "Medium" if score >= 70 else "Low",
+                "time": datetime.now().isoformat(),
+                "confluence_logic": f"{direction} confirmed: Clone={clone_complete}, Accum={accumulation}",
+                "passed_layers": 9,
+                "entry_zone": structure.get("entry_zone", ""),
+                "exit_zone": structure.get("exit_zone", ""),
+                "supports": structure.get("supports", []),
+                "resistances": structure.get("resistances", []),
+                "atr": structure.get("atr", 0),
+            }
+            self.dashboard_queue.put({"type": "signal", "signal": signal})
+            self.storage_queue.put(("signal", signal))
+            if self.app_state:
+                self.app_state.signal_data = signal
+                self.app_state.transition("ACTIVE_SIGNAL")
+                self.app_state.signal_count_today += 1
+            logging.info(f"Signal {direction} for {asset} ID {signal['trade_id']}")
 
-        # Enhanced duplicate check using hash
-        sig_hash = self._compute_signal_hash(symbol, direction, entry, struct)
-        if sig_hash in self._duplicate_cache:
-            return None
-        self._duplicate_cache[sig_hash] = datetime.now()
-        if len(self._duplicate_cache) > 1000:
-            oldest = min(self._duplicate_cache, key=self._duplicate_cache.get)
-            del self._duplicate_cache[oldest]
-
-        sig = Signal(direction, entry, sl, tp, rr, confidence)
-        sig.reason = f"Clone Complete, {struct.trend} trend, RR {rr:.2f}"
-        sig.layers = ["Trend", "Structure", "Clone", "Liquidity", "CHOCH", "BOS", "Volume", "RR", "Confidence", "Final"]
-        self.last_signal = sig
-        self.last_signal_time = sig.timestamp
-        signal_log.info(f"SIGNAL: {sig.direction} at {sig.entry}, SL={sig.sl}, TP={sig.tp}, RR={sig.rr:.2f}, Conf={confidence}")
-        return sig
-
-    def get_last_signal(self):
-        return self.last_signal
+    @staticmethod
+    def clamp(val, minv, maxv):
+        return max(minv, min(val, maxv))
