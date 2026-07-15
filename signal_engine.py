@@ -5,7 +5,7 @@ from queue import Queue, Empty
 from typing import Dict
 from datetime import datetime
 
-from utils import safe_divide
+from utils import clamp
 
 class SignalEngine(threading.Thread):
     def __init__(self, config, in_queue: Queue, out_queue: Queue, storage_queue: Queue, dashboard_queue: Queue):
@@ -17,7 +17,7 @@ class SignalEngine(threading.Thread):
         self.dashboard_queue = dashboard_queue
         self.running = False
         self.app_state = None
-        self.last_pre_alert = {}   # asset -> last pre-alert timestamp
+        self.last_pre_alert = {}
         self.processed_candles = set()
 
     def run(self):
@@ -43,7 +43,6 @@ class SignalEngine(threading.Thread):
         if not asset or not candle or not structure:
             return
 
-        # Daily signal limit
         today = datetime.now().date()
         if self.app_state:
             if self.app_state.last_signal_date != today:
@@ -53,7 +52,7 @@ class SignalEngine(threading.Thread):
                 logging.debug(f"Daily max reached for {asset}")
                 return
 
-        # Pre-alert: if 5-6 minutes before candle close
+        # Pre-alert
         now = time.time()
         close_time = candle["start_time"] + 15 * 60
         time_to_close = close_time - now
@@ -65,31 +64,21 @@ class SignalEngine(threading.Thread):
                 self.dashboard_queue.put({"type": "pre_alert", "asset": asset, "message": msg, "score": score})
                 self.storage_queue.put(("pre_alert", {"asset": asset, "time": now, "score": score}))
 
-        # Avoid duplicate processing
         key = f"{asset}_{candle['start_time']}"
         if key in self.processed_candles:
             return
         self.processed_candles.add(key)
 
-        score = structure.get("score", 0)
-        if score < 70:
+        # Use the new `ready` flag from structure
+        if not structure.get("ready", False):
             return
 
-        # Conditional triggers
         clone_complete = structure.get("clone_complete", False)
         accumulation = structure.get("accumulation_confirm", False)
         distribution = structure.get("distribution_confirm", False)
         origin_shift = structure.get("origin_shift", False)
         origin_confirm = structure.get("origin_confirm", False)
         structure_confirm = structure.get("structure_confirm", False)
-        manipulation = structure.get("manipulation_phase", False)
-        mismatch = structure.get("structure_mismatch", False)
-        clone_ratio_var = structure.get("clone_ratio_variance", False)
-        rr_ok = structure.get("risk_reward_ok", False)
-
-        no_trade = manipulation or mismatch or clone_ratio_var or not rr_ok
-        if no_trade:
-            return
 
         direction = None
         if clone_complete and accumulation and origin_shift:
@@ -106,9 +95,9 @@ class SignalEngine(threading.Thread):
                 "sl": structure.get("sl", 0),
                 "tp": structure.get("tp", 0),
                 "rr": structure.get("risk_reward", 0),
-                "win_prob": clamp(60 + (score - 70) * 0.5, 50, 95),
-                "score": score,
-                "strength": "High" if score >= 85 else "Medium" if score >= 70 else "Low",
+                "win_prob": clamp(60 + (structure.get("score", 0) - 70) * 0.5, 50, 95),
+                "score": structure.get("score", 0),
+                "strength": "High" if structure.get("score", 0) >= 85 else "Medium" if structure.get("score", 0) >= 70 else "Low",
                 "time": datetime.now().isoformat(),
                 "confluence_logic": f"{direction} confirmed: Clone={clone_complete}, Accum={accumulation}",
                 "passed_layers": 9,
@@ -125,7 +114,3 @@ class SignalEngine(threading.Thread):
                 self.app_state.transition("ACTIVE_SIGNAL")
                 self.app_state.signal_count_today += 1
             logging.info(f"Signal {direction} for {asset} ID {signal['trade_id']}")
-
-    @staticmethod
-    def clamp(val, minv, maxv):
-        return max(minv, min(val, maxv))
