@@ -9,8 +9,8 @@ def load_config() -> Dict[str, Any]:
         "POLL_INTERVAL_NORMAL": 5,
         "POLL_INTERVAL_LATENT": 10,
         "CIRCUIT_BREAKER_TIMEOUT": 30,
-        "SESSION_START": "09:15",
-        "SESSION_END": "15:30",
+        "SESSION_START": "06:30",
+        "SESSION_END": "23:30",
         "TIMEZONE": "Asia/Kolkata",
         "ASSETS": ["NIFTY 50", "NIFTY BANK", "SENSEX", "INDIA VIX"],
         "YAHOO_SYMBOLS": {
@@ -25,7 +25,6 @@ def load_config() -> Dict[str, Any]:
             "SENSEX": "sensex",
             "INDIA VIX": "india_vix"
         },
-        # Weighted decision matrix (sum = 100)
         "WEIGHT_CLONE_COMPLETION": 25,
         "WEIGHT_ORIGIN_MAPPING": 20,
         "WEIGHT_LIQUIDITY_SWEEPS": 20,
@@ -39,7 +38,6 @@ def load_config() -> Dict[str, Any]:
         "VACUUM_INTERVAL": 604800,
         "MEMORY_LIMIT_MB": 200,
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
-        # ATR volatility thresholds for polling
-        "ATR_LOW": 0.5,      # if ATR% < 0.5% -> latent
-        "ATR_HIGH": 1.5,     # if ATR% > 1.5% -> aggressive
+        "ATR_LOW": 0.5,
+        "ATR_HIGH": 1.5,
     }
