@@ -9,8 +9,8 @@ def load_config() -> Dict[str, Any]:
         "POLL_INTERVAL_NORMAL": 5,
         "POLL_INTERVAL_LATENT": 10,
         "CIRCUIT_BREAKER_TIMEOUT": 30,
-        "SESSION_START": "06:30",
-        "SESSION_END": "23:30",
+        "SESSION_START": "09:15",
+        "SESSION_END": "15:30",
         "TIMEZONE": "Asia/Kolkata",
         "ASSETS": ["NIFTY 50", "NIFTY BANK", "SENSEX", "INDIA VIX"],
         "YAHOO_SYMBOLS": {
