@@ -3,7 +3,6 @@ import threading
 import logging
 import sys
 import gc
-import weakref
 
 class Supervisor:
     def __init__(self, data_engine, structure_engine, signal_engine,
@@ -17,9 +16,7 @@ class Supervisor:
         self.app_state = app_state
         self.config = config
 
-        # Inject storage queue
         self.storage.queue = storage_queue
-        # Inject state into signal engine
         self.signal_engine.app_state = app_state
 
         self.threads = {
@@ -39,7 +36,6 @@ class Supervisor:
                 return
             self.running = True
 
-        # Start storage first
         self._start_thread("storage")
         time.sleep(0.5)
         for name in ["data", "structure", "signal", "dashboard"]:
@@ -49,7 +45,6 @@ class Supervisor:
         logging.info("Supervisor started all threads.")
         while self.running:
             self._check_health()
-            # Memory monitor
             if get_memory_usage_mb() > self.config["MEMORY_LIMIT_MB"]:
                 logging.warning("Memory limit exceeded, forcing GC.")
                 gc.collect()
@@ -102,17 +97,14 @@ class Supervisor:
             self.stop()
             sys.exit(1)
         logging.info(f"Restarting {name} (attempt {count})...")
-        # Clean up old thread
         old = self.threads[name]
         try:
             old.stop()
         except:
             pass
-        # Force GC to release references
         del old
         gc.collect()
 
-        # Recreate thread
         new_thread = None
         if name == "data":
             new_thread = self.data_engine.__class__(self.data_engine.config,
@@ -143,7 +135,6 @@ class Supervisor:
         self.threads[name] = new_thread
         self._start_thread(name)
 
-# Utility function to get memory usage (defined here to avoid circular import)
 def get_memory_usage_mb():
     try:
         import resource
