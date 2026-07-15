@@ -1,16 +1,24 @@
-# nifty-institutional-bot
+# nifty-institutional-bot – Institutional Grade Signal Board
 
-Zero‑dependency, thread‑safe, memory‑efficient trading signal board for NIFTY 50, NIFTY BANK, and SENSEX.  
-Designed for resource‑constrained environments (Render Free Tier, Termux, Pydroid 3).
+**Ultimate version** – combines the full original feature set with ATR‑weighted breakout, institutional OI skew mechanics, and advanced anti‑trap filters. Continuous data ingestion – never sleeps.
 
-## Core Features
-- Multi‑layered structural analysis (Clone Completion, Origin Mapping, Liquidity Sweeps).
-- 100-Point Weighted Decision Matrix.
-- Volatility-based adaptive polling (1s/5s/10s intervals).
-- 5-Minute Pre-Alert before 15‑min candle close.
-- SQLite WAL mode storage with 120-day automated pruning.
-- Supervisor Watchdog for automatic thread recovery.
+## Features
+- Adaptive polling (1s default)
+- Weighted scoring matrix (Clone, Origin, Liquidity, Structure, Trap, Premium)
+- ATR‑weighted volume breakout and adaptive thresholds
+- Institutional OI skew (PCR, Call/Put skew) and strike‑level barrier detection
+- Multi‑zone anti‑trap filtering (reduces false signals)
+- Pre‑alert 5 minutes before candle close
+- Real‑time mock data fallback for continuous testing
+- ASCII dashboard with support/resistance, entry, SL, TP
+- SQLite storage with WAL and automated pruning (120‑day retention)
+- Watchdog supervisor with auto‑restart (up to 5 attempts)
+- Built‑in HTTP health check for Render
 
-## Quick Start
+## Deploy on Render
+- Set `FORCE_SESSION=true` to keep bot running 24/7.
+- All configuration via environment variables (optional).
+
+## Run Locally
 ```bash
 python main.py
