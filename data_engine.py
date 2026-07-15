@@ -7,9 +7,10 @@ import csv
 import io
 from queue import Queue, Empty
 from typing import Dict, Optional
+from datetime import datetime
+import random
 
-from config import load_config
-from utils import is_market_session, is_weekend, safe_divide
+from utils import is_market_session, is_weekend, generate_mock_price, calculate_institutional_options_view
 
 class CircuitBreaker:
     def __init__(self, timeout=30):
@@ -43,14 +44,16 @@ class DataEngine(threading.Thread):
         self.running = False
         self.paused = False
         self.circuit_breaker = CircuitBreaker(timeout=config["CIRCUIT_BREAKER_TIMEOUT"])
-        self.poll_interval = config["POLL_INTERVAL_NORMAL"]
+        self.poll_interval = config["POLL_INTERVAL_AGGRESSIVE"]
         self.assets = config["ASSETS"]
         self.yahoo_symbols = config["YAHOO_SYMBOLS"]
         self.stooq_symbols = config["STOOQ_SYMBOLS"]
         self.sources = config["DATA_SOURCES"]
-        # Volatility tracker (simple: price change %)
-        self.prev_close = {}  # asset -> last close
-        self.atr_percent = {}  # asset -> recent ATR percentage
+        self.prev_close = {}
+        self.atr_percent = {}
+        self.use_mock = False
+        self.mock_data = {}
+        self.mock_idx = {}
 
     def run(self):
         self.running = True
@@ -59,44 +62,41 @@ class DataEngine(threading.Thread):
             if not is_market_session() or is_weekend():
                 if not self.paused:
                     self.paused = True
-                    logging.info("Outside market – sleep mode.")
-                time.sleep(60)
+                    logging.info("Outside market – mock data mode (continuous).")
+                for asset in self.assets:
+                    if not self.running: break
+                    mock = self._get_mock_data(asset)
+                    if mock:
+                        self.data_queue.put(mock)
+                        self.storage_queue.put(("raw_data", mock))
+                time.sleep(1)
                 continue
+
             if self.paused:
                 self.paused = False
-                logging.info("Market active – resuming.")
+                logging.info("Market active – resuming real data.")
 
-            # Fetch data for all assets
             for asset in self.assets:
-                if not self.running:
-                    break
+                if not self.running: break
                 data = self._fetch_asset_data(asset)
                 if data:
                     self.circuit_breaker.record_data()
-                    # Update volatility tracker
                     self._update_volatility(asset, data.get("close"))
+                    options_view = calculate_institutional_options_view(data["close"])
+                    data.update(options_view)
                     self.data_queue.put(data)
                     self.storage_queue.put(("raw_data", data))
                 else:
-                    logging.debug(f"No data for {asset}")
+                    if not self.use_mock:
+                        logging.warning(f"No data for {asset} – using mock")
+                        self.use_mock = True
+                    mock = self._get_mock_data(asset)
+                    if mock:
+                        self.data_queue.put(mock)
+                        self.storage_queue.put(("raw_data", mock))
+                time.sleep(0.3)
 
-                time.sleep(0.5)  # small delay between assets
-
-            # Adjust polling interval based on average ATR% across assets
-            avg_atr = 0.0
-            count = 0
-            for v in self.atr_percent.values():
-                avg_atr += v
-                count += 1
-            if count:
-                avg_atr /= count
-                if avg_atr > self.config["ATR_HIGH"]:
-                    self.poll_interval = self.config["POLL_INTERVAL_AGGRESSIVE"]
-                elif avg_atr < self.config["ATR_LOW"]:
-                    self.poll_interval = self.config["POLL_INTERVAL_LATENT"]
-                else:
-                    self.poll_interval = self.config["POLL_INTERVAL_NORMAL"]
-
+            self.poll_interval = self.config["POLL_INTERVAL_AGGRESSIVE"]
             time.sleep(self.poll_interval)
 
         logging.info("DataEngine stopped.")
@@ -104,13 +104,43 @@ class DataEngine(threading.Thread):
     def stop(self):
         self.running = False
 
+    def _init_mock_data(self, asset):
+        if asset not in self.mock_data:
+            self.mock_data[asset] = generate_mock_price(base_price=24600 + random.randint(-200, 200), steps=2000)
+            self.mock_idx[asset] = 0
+            logging.info(f"Mock data active for {asset}")
+
+    def _get_mock_data(self, asset):
+        if asset not in self.mock_data:
+            self._init_mock_data(asset)
+        idx = self.mock_idx.get(asset, 0)
+        prices = self.mock_data.get(asset, [])
+        if not prices or idx >= len(prices):
+            self._init_mock_data(asset)
+            idx = 0
+        price = prices[idx]
+        self.mock_idx[asset] = idx + 1
+        options_view = calculate_institutional_options_view(price)
+        volume_spike = random.choice([1.0, 1.1, 2.1, 3.4]) if (idx % 18 == 0) else 1.0
+        base_volume = int(random.randint(600000, 1200000) * volume_spike)
+        mock_packet = {
+            "asset": asset,
+            "open": price,
+            "high": price * (1 + random.uniform(0, 0.0025)),
+            "low": price * (1 - random.uniform(0, 0.0025)),
+            "close": price,
+            "volume": base_volume,
+            "source": "mock_gift_nifty",
+            "timestamp": time.time()
+        }
+        mock_packet.update(options_view)
+        return mock_packet
+
     def _update_volatility(self, asset, close):
-        if close is None:
-            return
+        if close is None: return
         prev = self.prev_close.get(asset)
         if prev is not None and prev != 0:
-            change = abs(close - prev) / (prev + 1e-9)
-            # Simple exponential smoothing for ATR% (simplified)
+            change = abs(close - prev) / (abs(prev) + 1e-9)
             old = self.atr_percent.get(asset, 0.0)
             self.atr_percent[asset] = 0.9 * old + 0.1 * change
         self.prev_close[asset] = close
@@ -121,8 +151,6 @@ class DataEngine(threading.Thread):
                 data = self._fetch_yahoo(asset)
             elif source == "stooq":
                 data = self._fetch_stooq(asset)
-            elif source == "cache":
-                data = None  # not implemented
             else:
                 data = None
             if data:
@@ -134,29 +162,24 @@ class DataEngine(threading.Thread):
 
     def _fetch_yahoo(self, asset: str) -> Optional[Dict]:
         symbol = self.yahoo_symbols.get(asset)
-        if not symbol:
-            return None
+        if not symbol: return None
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
         try:
             with urllib.request.urlopen(url, timeout=10) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 data = json.loads(resp.read().decode('utf-8'))
                 result = data.get("chart", {}).get("result")
-                if not result:
-                    return None
-                meta = result[0].get("meta", {})
+                if not result: return None
                 timestamps = result[0].get("timestamp", [])
                 quote = result[0].get("indicators", {}).get("quote", [{}])[0]
-                if not timestamps or not quote.get("close"):
-                    return None
+                if not timestamps or not quote.get("close"): return None
                 idx = -1
                 return {
-                    "open": quote["open"][idx] if quote["open"] else None,
-                    "high": quote["high"][idx] if quote["high"] else None,
-                    "low": quote["low"][idx] if quote["low"] else None,
-                    "close": quote["close"][idx] if quote["close"] else None,
-                    "volume": quote["volume"][idx] if quote["volume"] else None,
+                    "open": quote["open"][idx],
+                    "high": quote["high"][idx],
+                    "low": quote["low"][idx],
+                    "close": quote["close"][idx],
+                    "volume": quote["volume"][idx],
                     "time": datetime.fromtimestamp(timestamps[idx]).isoformat()
                 }
         except Exception as e:
@@ -165,18 +188,15 @@ class DataEngine(threading.Thread):
 
     def _fetch_stooq(self, asset: str) -> Optional[Dict]:
         symbol = self.stooq_symbols.get(asset)
-        if not symbol:
-            return None
+        if not symbol: return None
         url = f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
         try:
             with urllib.request.urlopen(url, timeout=10) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 content = resp.read().decode('utf-8')
                 reader = csv.DictReader(io.StringIO(content))
                 rows = list(reader)
-                if not rows:
-                    return None
+                if not rows: return None
                 last = rows[-1]
                 return {
                     "open": float(last.get("Open", 0)),
